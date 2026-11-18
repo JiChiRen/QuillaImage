@@ -244,6 +244,7 @@ class MainWindow(QMainWindow):
             "meta_out": self.ed_meta_out.text().strip(),
             "meta_base": self.ed_meta_base.text().strip(),
             "app_start": self.ed_app_start.text().strip(),
+            "chip": self._chip(),
             "version": self.spin_version.value(),
             "chip_erase": self.cb_erase.isChecked(),
             "preset_seal": self.cb_seal.isChecked(),
@@ -269,11 +270,21 @@ class MainWindow(QMainWindow):
             return
         if not isinstance(state, dict):
             return
+        # 芯片先恢复：切换会写默认地址，之后再用存档里的地址覆盖，
+        # 这样用户自定义布局不会被默认值冲掉。
+        chip = state.get("chip")
+        if chip in core.TARGETS:
+            idx = self.cmb_chip.findData(chip)
+            if idx >= 0:
+                self.cmb_chip.setCurrentIndex(idx)
         for key in self._STATE_KEYS:
             value = state.get(key)
             if value:
                 edit = getattr(self, "ed_" + key)
                 edit.setText(str(value))
+        # pyocd target 与芯片几何保持一致（存档里的 target 可能已过时）
+        if chip in core.TARGETS:
+            self.ed_target.setText(core.resolve_target(chip)["name"])
         if "version" in state:
             try:
                 self.spin_version.setValue(int(state["version"]))
@@ -302,11 +313,31 @@ class MainWindow(QMainWindow):
         box = QGroupBox("布局（两页共用）")
         form = QFormLayout(box)
 
+        self.cmb_chip = QComboBox()
+        for key in sorted(core.TARGETS):
+            self.cmb_chip.addItem(core.TARGETS[key][4], key)
+        self.cmb_chip.currentIndexChanged.connect(self._on_chip_changed)
+        form.addRow("目标芯片:", self.cmb_chip)
+
         self.ed_meta_base = QLineEdit("0x%08X" % core.DEFAULT_META_BASE)
         self.ed_app_start = QLineEdit("0x%08X" % core.DEFAULT_APP_START)
         form.addRow("META 起址 (十六进制):", self.ed_meta_base)
         form.addRow("APP 起址 (十六进制):", self.ed_app_start)
         return box
+
+    def _chip(self) -> str:
+        """当前选择的芯片键（几何参数用）。"""
+        return self.cmb_chip.currentData() or "py32f040xb"
+
+    def _on_chip_changed(self, _idx=0):
+        """切换芯片时同步默认布局（用户仍可手动改地址）。"""
+        t = core.resolve_target(self.cmb_chip.currentData())
+        self.ed_meta_base.setText("0x%08X" % t["meta_base"])
+        self.ed_app_start.setText("0x%08X" % t["app_start"])
+        # 烧录页的 pyocd target 名与芯片键一致，顺带同步
+        if hasattr(self, "ed_target"):
+            self.ed_target.setText(t["name"])
+        self._save_state()
 
     def _build_tabs(self) -> QWidget:
         tabs = QTabWidget()
@@ -573,7 +604,8 @@ class MainWindow(QMainWindow):
             combined, rec, info = core.make_combined(
                 boot, app, version, sign_seed=sign_seed,
                 preset_seal=self.cb_seal.isChecked(),
-                meta_base=meta_base, app_start=app_start)
+                meta_base=meta_base, app_start=app_start,
+                target=self._chip())
             core._write_file(out_path, combined)
             if meta_out:
                 core._write_file(meta_out, rec)
@@ -604,7 +636,7 @@ class MainWindow(QMainWindow):
             return
         try:
             meta_base, app_start = self._layout_addrs()
-            layout = core.resolve_layout(meta_base, app_start)
+            layout = core.resolve_layout(meta_base, app_start, self._chip())
         except core.ImageError as exc:
             QMessageBox.critical(self, "解析失败", str(exc))
             self.log("解析失败：%s" % exc)
@@ -612,9 +644,9 @@ class MainWindow(QMainWindow):
 
         # 向量表硬错误仍然拦截（镜像本身不合法，后续无从谈起）
         try:
-            boot_sp, boot_reset = core.validate_boot(boot)
+            boot_sp, boot_reset = core.validate_boot(boot, self._chip())
             app_sp, app_reset = core.validate_app(
-                app, layout["app_start"], layout["app_size"])
+                app, layout["app_start"], layout["app_size"], self._chip())
         except core.ImageError as exc:
             QMessageBox.critical(self, "解析失败", str(exc))
             self.log("解析失败：%s" % exc)
@@ -675,7 +707,8 @@ class MainWindow(QMainWindow):
             meta_base, app_start = self._layout_addrs()
             info = core.verify_combined(core._read_file(image_path),
                                         meta_base=meta_base,
-                                        app_start=app_start)
+                                        app_start=app_start,
+                                        target=self._chip())
             self.log("烧前校验通过：%s" % image_path)
             self._show_info(info)
         except (core.ImageError, OSError) as exc:
@@ -726,7 +759,8 @@ class MainWindow(QMainWindow):
             _, rec, info = core.make_combined(
                 boot, app, version, sign_seed=sign_seed,
                 preset_seal=self.cb_seal.isChecked(),
-                meta_base=meta_base, app_start=app_start)
+                meta_base=meta_base, app_start=app_start,
+                target=self._chip())
             core._write_file(path, rec)
             self.log("已导出 META 记录：%s" % path)
             self._show_info(info)
@@ -743,7 +777,8 @@ class MainWindow(QMainWindow):
             meta_base, app_start = self._layout_addrs()
             info = core.verify_combined(core._read_file(path),
                                         meta_base=meta_base,
-                                        app_start=app_start)
+                                        app_start=app_start,
+                                        target=self._chip())
             self.log("校验通过：%s" % path)
             self._show_info(info)
             self.log("  APP MSP 0x%08X / reset 0x%08X"
@@ -763,7 +798,8 @@ class MainWindow(QMainWindow):
             meta_base, app_start = self._layout_addrs()
             info = core.verify_combined(core._read_file(path),
                                         meta_base=meta_base,
-                                        app_start=app_start)
+                                        app_start=app_start,
+                                        target=self._chip())
             self.log("校验通过：%s" % path)
             self._show_info(info)
             self.log("  APP MSP 0x%08X / reset 0x%08X"

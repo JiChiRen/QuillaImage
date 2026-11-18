@@ -36,7 +36,7 @@ import struct
 import sys
 import zlib
 
-# ---------------------------------------------------------------- 分区常量
+# 分区常量（PY32F040xB 默认值，保留为函数缺省以兼容既有调用）
 FLASH_BASE = 0x08000000
 FLASH_SIZE = 0x00020000
 QBOOT_SIZE = 0x00006000
@@ -46,6 +46,32 @@ META_SIZE = 0x00001000
 APP_START = 0x08007000
 APP_OFFSET = APP_START - FLASH_BASE            # 0x7000
 APP_SIZE = 0x00019000
+
+# 芯片几何预设。不同 MCU 的 Flash / SRAM 容量不同，向量表校验必须按
+# 目标芯片取边界，不能用某一款的值硬编码——否则 64 KiB SRAM 的
+# GD32F502VE（MSP 0x200044E8）会被误判为越界。
+# 每项: (flash_size, ram_size, meta_base, app_start, display_name)
+TARGETS = {
+    "py32f040xb": (0x00020000, 0x00004000, 0x08006000, 0x08007000,
+                   "PY32F040xB (128 KiB Flash / 16 KiB RAM)"),
+    "gd32f502ve": (0x00080000, 0x00010000, 0x08006000, 0x08007000,
+                   "GD32F502VE (512 KiB Flash / 64 KiB RAM)"),
+}
+
+
+def resolve_target(name: str | None) -> dict:
+    """按芯片名返回几何参数；None/空串退回 PY32 默认（兼容旧调用）。"""
+    key = (name or "py32f040xb").strip().lower()
+    if key not in TARGETS:
+        raise ImageError("未知目标芯片 %r；可选：%s"
+                         % (name, ", ".join(sorted(TARGETS))))
+    flash_size, ram_size, meta_base, app_start, label = TARGETS[key]
+    return {
+        "name": key, "flash_base": FLASH_BASE, "flash_size": flash_size,
+        "ram_start": RAM_START, "ram_size": ram_size,
+        "meta_base": meta_base, "app_start": app_start, "label": label,
+    }
+
 
 RAM_START = 0x20000000
 RAM_SIZE = 0x00004000
@@ -130,8 +156,9 @@ def detect_variant(boot: bytes) -> str:
     return "unknown"
 
 
-def validate_boot(boot: bytes) -> tuple[int, int]:
+def validate_boot(boot: bytes, target: str | None = None) -> tuple[int, int]:
     """校验 QBOOT 镜像大小与向量表，返回 (初始MSP, 复位向量)。"""
+    t = resolve_target(target)
     if not boot:
         raise ImageError("QBOOT 镜像为空")
     if len(boot) > QBOOT_SIZE:
@@ -142,10 +169,12 @@ def validate_boot(boot: bytes) -> tuple[int, int]:
     if len(boot) < 8:
         raise ImageError("QBOOT 镜像不足 8 字节，读不到向量表")
     sp, reset = struct.unpack_from("<II", boot, 0)
-    if not (RAM_START <= sp < RAM_START + RAM_SIZE):
+    ram_end = t["ram_start"] + t["ram_size"]
+    if not (t["ram_start"] <= sp < ram_end):
         raise ImageError(
             "QBOOT 初始 MSP 0x%08X 不在 RAM [0x%08X, 0x%08X) 内"
-            % (sp, RAM_START, RAM_START + RAM_SIZE)
+            "（目标 %s）；检查所选芯片是否与 QBOOT 工程一致"
+            % (sp, t["ram_start"], ram_end, t["label"])
         )
     if not (FLASH_BASE <= reset < FLASH_BASE + QBOOT_SIZE):
         raise ImageError(
@@ -155,40 +184,46 @@ def validate_boot(boot: bytes) -> tuple[int, int]:
 
 
 def resolve_layout(meta_base: int | None = None,
-                   app_start: int | None = None) -> dict:
+                   app_start: int | None = None,
+                   target: str | None = None) -> dict:
     """解析并校验 META/APP 起址布局，返回偏移与 APP 容量。
 
     约束：QBOOT 固定占 [FLASH_BASE, FLASH_BASE+QBOOT_SIZE)；
     META 区大小固定 META_SIZE；META 与 APP 起址 4 字节对齐；
     APP 区从 app_start 一直延伸到 FLASH 末尾（容量自动推导）。
     """
-    meta_base = DEFAULT_META_BASE if meta_base is None else meta_base
-    app_start = DEFAULT_APP_START if app_start is None else app_start
+    t = resolve_target(target)
+    meta_base = meta_base if meta_base is not None else t["meta_base"]
+    app_start = app_start if app_start is not None else t["app_start"]
+    flash_size = t["flash_size"]
     if meta_base % 4 or app_start % 4:
         raise ImageError("META/APP 起址必须 4 字节对齐")
     if not FLASH_BASE + QBOOT_SIZE <= meta_base <= \
-            FLASH_BASE + FLASH_SIZE - META_SIZE:
+            FLASH_BASE + flash_size - META_SIZE:
         raise ImageError(
             "META 起址 0x%08X 越界（应在 0x%08X..0x%08X 之间）"
             % (meta_base, FLASH_BASE + QBOOT_SIZE,
-               FLASH_BASE + FLASH_SIZE - META_SIZE))
+               FLASH_BASE + flash_size - META_SIZE))
     if app_start < meta_base + META_SIZE:
         raise ImageError(
             "APP 起址 0x%08X 必须不早于 META 区结束 0x%08X"
             % (app_start, meta_base + META_SIZE))
-    if app_start >= FLASH_BASE + FLASH_SIZE:
+    if app_start >= FLASH_BASE + flash_size:
         raise ImageError("APP 起址 0x%08X 超出 FLASH 末尾" % app_start)
     return {
+        "target": t["name"],
+        "flash_size": flash_size,
         "meta_base": meta_base,
         "app_start": app_start,
-        "app_size": FLASH_BASE + FLASH_SIZE - app_start,
+        "app_size": FLASH_BASE + flash_size - app_start,
         "meta_offset": meta_base - FLASH_BASE,
         "app_offset": app_start - FLASH_BASE,
     }
 
 
-def validate_app(app: bytes, app_start: int = APP_START,
-                 app_size: int = APP_SIZE) -> tuple[int, int]:
+def validate_app(app: bytes, app_start: int | None = None,
+                 app_size: int | None = None,
+                 target: str | None = None) -> tuple[int, int]:
     """校验 APP 镜像大小与向量表，返回 (初始MSP, 复位向量)。
 
     重点：SP 必须严格小于 RAM 末址。quilla 的
@@ -196,6 +231,11 @@ def validate_app(app: bytes, app_start: int = APP_START,
     判为非法镜像并拒跳 APP；GCC 链接脚本若把 _estack 定义成
     ORIGIN(RAM)+LENGTH(RAM)（0x20004000）会正好踩中这条。
     """
+    t = resolve_target(target)
+    if app_start is None:
+        app_start = t["app_start"]
+    if app_size is None:
+        app_size = t["flash_size"] - (app_start - FLASH_BASE)
     if not app:
         raise ImageError("APP 镜像为空")
     if len(app) > app_size:
@@ -206,11 +246,12 @@ def validate_app(app: bytes, app_start: int = APP_START,
     if len(app) < 8:
         raise ImageError("APP 镜像不足 8 字节，读不到向量表")
     sp, reset = struct.unpack_from("<II", app, 0)
-    if not (RAM_START <= sp < RAM_START + RAM_SIZE):
+    ram_end = t["ram_start"] + t["ram_size"]
+    if not (t["ram_start"] <= sp < ram_end):
         raise ImageError(
-            "APP 初始 MSP 0x%08X 不在 RAM [0x%08X, 0x%08X) 内；"
-            "若等于 0x%08X，检查链接脚本的 _estack"
-            % (sp, RAM_START, RAM_START + RAM_SIZE, RAM_START + RAM_SIZE)
+            "APP 初始 MSP 0x%08X 不在 RAM [0x%08X, 0x%08X) 内"
+            "（目标 %s）；若等于 0x%08X，检查链接脚本的 _estack"
+            % (sp, t["ram_start"], ram_end, t["label"], ram_end)
         )
     if not (app_start <= reset < app_start + app_size):
         raise ImageError(
@@ -388,7 +429,8 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
                   sign_seed: bytes | None = None,
                   preset_seal: bool = True,
                   meta_base: int | None = None,
-                  app_start: int | None = None) -> tuple[bytes, bytes, dict]:
+                  app_start: int | None = None,
+                  target: str | None = None) -> tuple[bytes, bytes, dict]:
     """返回 (整片 128 KiB 镜像, 256 B META 记录, manifest 信息字典)。
 
     meta_base / app_start 可覆盖默认布局（None 用出厂默认
@@ -409,9 +451,9 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
       * SEC    —— 同 SEALED 的签名与版本要求，但不写 seal（设备端
                   SECURE 模式每次启动全量验签，不用 seal）。
     """
-    layout = resolve_layout(meta_base, app_start)
-    validate_boot(boot)
-    validate_app(app, layout["app_start"], layout["app_size"])
+    layout = resolve_layout(meta_base, app_start, target)
+    validate_boot(boot, target)
+    validate_app(app, layout["app_start"], layout["app_size"], target)
 
     variant = detect_variant(boot)
     image_len = len(app)
@@ -450,7 +492,7 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
                             seal_hash=seal_hash, seal_len=seal_len,
                             app_size=layout["app_size"])
 
-    image = bytearray(b"\xFF" * FLASH_SIZE)
+    image = bytearray(b"\xFF" * layout["flash_size"])
     image[0:len(boot)] = boot
     image[layout["meta_offset"]:layout["meta_offset"] + RECORD_SIZE] = rec
     image[layout["app_offset"]:layout["app_offset"] + image_len] = app
@@ -476,20 +518,22 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
 
 
 def verify_combined(image: bytes, meta_base: int | None = None,
-                    app_start: int | None = None) -> dict:
+                    app_start: int | None = None,
+                    target: str | None = None) -> dict:
     """按 QBOOT 的视角复核整片镜像（布局与打包时一致才放行）。"""
-    if len(image) != FLASH_SIZE:
+    t = resolve_target(target)
+    if len(image) != t["flash_size"]:
         raise ImageError(
-            "整片镜像长度应为 %d B（0x08000000 起），实际 %d B"
-            % (FLASH_SIZE, len(image))
+            "整片镜像长度应为 %d B（目标 %s，0x08000000 起），实际 %d B"
+            % (t["flash_size"], t["label"], len(image))
         )
 
-    layout = resolve_layout(meta_base, app_start)
+    layout = resolve_layout(meta_base, app_start, target)
     boot_area = image[:QBOOT_SIZE]
-    boot_sp, boot_reset = validate_boot(boot_area)
+    boot_sp, boot_reset = validate_boot(boot_area, target)
     app_sp, app_reset = validate_app(
         image[layout["app_offset"]:layout["app_offset"] + layout["app_size"]],
-        layout["app_start"], layout["app_size"])
+        layout["app_start"], layout["app_size"], target)
 
     rec = image[layout["meta_offset"]:layout["meta_offset"] + RECORD_SIZE]
     info = parse_meta_record(rec, image=image,
@@ -653,8 +697,29 @@ def selftest() -> None:
     else:
         raise AssertionError("APP 起址早于 META 区结束未被拒绝")
 
+    # 9) 多芯片几何：GD32F502VE 的 64 KiB RAM / 512 KiB Flash。
+    #    回归：曾把 PY32 的 16 KiB RAM 硬编码，导致合法的
+    #    MSP 0x200044E8 被误判越界（银河显示屏 GD32 工程真实值）。
+    gd_boot = bytearray(boot)       # boot 变量来自步骤 2 的 CHECK 假镜像
+    struct.pack_into("<I", gd_boot, 0, 0x200044E8)   # 合法 MSP for 64 KiB RAM
+    gd_boot[32:39] = b"[CHECK]"
+    # reset 向量须落在 QBOOT 区内，boot 原向量已满足
+    gd_app = bytearray(app)
+    struct.pack_into("<I", gd_app, 0, 0x200062E0)   # 合法 APP MSP
+    combined_gd, _, info_gd = make_combined(
+        bytes(gd_boot), bytes(gd_app), version=1, target="gd32f502ve")
+    assert len(combined_gd) == 0x80000, "GD32 整片应为 512 KiB"
+    assert verify_combined(combined_gd, target="gd32f502ve")["variant"] == "CHECK"
+    # 同一镜像按 PY32 校验必须失败（RAM/Flash 边界不同）
+    try:
+        verify_combined(combined_gd)
+    except ImageError:
+        pass
+    else:
+        raise AssertionError("GD32 镜像按 PY32 几何校验未被拒绝")
+
     print("selftest: OK (CRC32 / 记录格式 / 合成布局 / 篡改检测 / 向量表边界 / "
-          "变体检测 / Ed25519 出厂签名 / 自定义布局)")
+          "变体检测 / Ed25519 出厂签名 / 自定义布局 / 多芯片几何)")
 
 
 # ---------------------------------------------------------------- CLI
@@ -709,6 +774,9 @@ def main(argv: list[str] | None = None) -> int:
     p_pack.add_argument("--app", required=True, help="量产 APP .bin（链接到 0x08007000）")
     p_pack.add_argument("--out", required=True, help="输出整片 bin（烧录到 0x08000000）")
     p_pack.add_argument("--meta-out", help="额外单独导出 256 B META 记录")
+    p_pack.add_argument("--target", default="py32f040xb",
+                        choices=sorted(TARGETS),
+                        help="目标芯片（决定整片长度与 RAM 边界，默认 py32f040xb）")
     p_pack.add_argument("--version", type=int, default=0,
                         help="manifest 版本号（仅 CHECK 变体使用；SEALED/SEC 自动取镜像 secver）")
     p_pack.add_argument("--key", help="Ed25519 私钥 private.hex（SEALED/SEC 变体必填）")
@@ -721,6 +789,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_verify = sub.add_parser("verify", help="校验已有整片 bin")
     p_verify.add_argument("--image", required=True)
+    p_verify.add_argument("--target", default="py32f040xb",
+                          choices=sorted(TARGETS),
+                          help="目标芯片（默认 py32f040xb）")
     p_verify.add_argument("--meta-base", type=lambda s: int(s, 0),
                           help="META 记录起址（默认 0x08006000）")
     p_verify.add_argument("--app-start", type=lambda s: int(s, 0),
@@ -743,7 +814,8 @@ def main(argv: list[str] | None = None) -> int:
             combined, rec, info = make_combined(
                 boot, app, version=args.version,
                 sign_seed=sign_seed, preset_seal=not args.no_seal,
-                meta_base=args.meta_base, app_start=args.app_start)
+                meta_base=args.meta_base, app_start=args.app_start,
+                target=args.target)
             _write_file(args.out, combined)
             if args.meta_out:
                 _write_file(args.meta_out, rec)
@@ -759,7 +831,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "verify":
             image = _read_file(args.image)
             info = verify_combined(image, meta_base=args.meta_base,
-                                   app_start=args.app_start)
+                                   app_start=args.app_start,
+                                   target=args.target)
             print("校验通过：%s" % args.image)
             _print_info(info)
             print("  MSP/reset  : APP 0x%08X / 0x%08X" %

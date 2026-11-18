@@ -21,7 +21,19 @@ Both tabs share the META base / APP start layout fields. Defaults match the
 PY32F040xB reference layout (see below); change them only when the QBOOT build
 and the APP linker base agree with the new values.
 
-### Image layout (default, PY32F040xB)
+### Supported targets
+
+| Target | Flash | RAM | Full image |
+|---|---|---|---|
+| `py32f040xb` (default) | 128 KiB | 16 KiB | 128 KiB |
+| `gd32f502ve` | 512 KiB | 64 KiB | 512 KiB |
+
+Select the chip in the shared layout box. Switching it updates the default
+META / APP addresses (both `0x08006000` / `0x08007000`) and the vector-table
+check uses that chip's RAM and flash boundaries. The CLI takes
+`--target gd32f502ve` for `pack` and `verify`.
+
+### Image layout (PY32F040xB default)
 
 | Region | Address | Size |
 |---|---|---|

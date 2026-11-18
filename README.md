@@ -1,0 +1,80 @@
+# QuillaImage
+
+**English** · [中文](README.zh-CN.md)
+
+Standalone Windows GUI for preparing and flashing Quilla manufacturing images.
+It merges a QBOOT binary and an APP binary into one full-chip image with a
+valid META/manifest record, verifies the result, and optionally flashes it
+over SWD with [pyocd](https://github.com/pyocd/pyOCD).
+
+This is a host-side production tool. It does not change QBOOT, the QIAP
+protocol, or the on-target secure-boot policy.
+
+## What it does
+
+| Tab | Function |
+|---|---|
+| **Flash** | Pick an existing full-chip `combined.bin` → verify it (vector tables, META CRC, image SHA-256) → flash once at `0x08000000` via pyocd. Does **not** regenerate the manifest. |
+| **Pack** | Pick QBOOT + APP (+ private key for SEALED/SEC) → generate the manifest → produce one full-chip image for the Flash tab. Can also export only the 256-byte META record, or verify an existing image. |
+
+Both tabs share the META base / APP start layout fields. Defaults match the
+PY32F040xB reference layout (see below); change them only when the QBOOT build
+and the APP linker base agree with the new values.
+
+### Image layout (default, PY32F040xB)
+
+| Region | Address | Size |
+|---|---|---|
+| QBOOT | `0x08000000` | 24 KiB (fixed) |
+| META | `0x08006000` | 4 KiB (two 2 KiB slots, 256 B records) |
+| APP | `0x08007000` | 100 KiB (to `0x08020000`) |
+
+The manifest covers `SHA-256(APP[0:image_len])`. The tool detects the QBOOT
+variant from its banner (`[CHECK]` / `[SEALED]` / `[SEC]`) and refuses to pack
+if the variant cannot be determined.
+
+- **CHECK**: zero signature, zero seal, no anti-rollback floor — integrity
+  only, not authenticated boot.
+- **SEALED / SEC**: requires a 32-byte Ed25519 seed (`private.hex`) and an APP
+  image carrying the `QAV1` security-version record at offset `0x400`. SEALED
+  may preset the seal so first boot skips the ~20 s verification.
+
+## Install & run
+
+From source (core packer needs **no third-party packages**):
+
+```bash
+python -m package.image selftest       # RFC 8032 vectors + pack/verify checks
+python -m package.image --help         # pack / verify CLI
+python -m package.image pack --boot QBOOT_CHECK.bin --app app.bin --out combined.bin
+```
+
+GUI and flashing need:
+
+```bash
+pip install -e .[gui]        # PySide6 + pyocd
+python gui.py                # or: python gui.py --check  (dependency check)
+```
+
+Standalone executable: download `quilla-image.exe` from Releases, no Python
+installation required. The GUI stores its last-used paths in
+`~/.quilla_image/state.json` (delete that file to reset); it never writes into
+the executable's directory.
+
+## Boundaries
+
+- The tool prepares images. It does not **provision keys** into devices and
+  does not verify that a chosen key matches what is baked into a given QBOOT.
+  With the default public demo key, signed images are not authenticated.
+- CHECK mode is integrity-only. It is not secure boot and makes no
+  authenticity claim.
+- No IEC 61508 / ISO 26262 certification or SIL level is claimed.
+- pyocd flashing is a convenience for low-volume / engineering use. High-volume
+  production lines should use their own programmer and the Flash tab's
+  "verify only" check.
+
+## License
+
+Apache-2.0 (see [LICENSE](LICENSE)). The vendored Ed25519 signer is identical
+to the one in [Quilla](https://github.com/JiChiRen/Quilla) (`tools/quilla_ed25519_sign.py`);
+see [NOTICE](NOTICE).

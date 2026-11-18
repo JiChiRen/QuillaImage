@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quilla-image"
+version = "1.0.0"
+description = "Quilla QBOOT manufacturing image packer and flasher"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "JiChiRen Info. Tech." }]
+keywords = ["quilla", "qboot", "firmware", "manufacturing", "ed25519"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Embedded Systems",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6", "pyocd>=0.37"]
+build = ["PySide6>=6.6", "pyocd>=0.37", "PyInstaller>=6.0"]
+
+[project.scripts]
+quilla-image = "gui:main"
+
+[tool.setuptools]
+py-modules = ["gui"]
+packages = ["package"]

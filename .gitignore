@@ -1,0 +1,24 @@
+# Build / packaging
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Runtime state and generated images (never commit)
+.quilla_image/
+out/
+*.bin
+*.hex
+state.json
+.qboot_provision_state.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

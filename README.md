@@ -69,9 +69,11 @@ python gui.py                # or: python gui.py --check  (dependency check)
 ```
 
 Standalone executable: download `quilla-image.exe` from Releases, no Python
-installation required. The GUI stores its last-used paths in
-`~/.quilla_image/state.json` (delete that file to reset); it never writes into
-the executable's directory.
+installation required. Settings are stored in `state.json` **next to the
+executable** (or at the repository root when run from source), so a portable
+copy of the tool carries its paths and options with it. Delete that file to
+reset. Bundled icons are read from the internal resource directory; the
+executable's own directory is never used for read-only assets.
 
 ## Boundaries
 

@@ -9,13 +9,16 @@ __pycache__/
 *.egg-info/
 .venv/
 
-# Runtime state and generated images (never commit)
+# Runtime settings (stored beside the app / exe, never committed)
 .quilla_image/
+state.json
+config.json
+.qboot_provision_state.json
+
+# Generated manufacturing images and key material (never commit)
 out/
 *.bin
 *.hex
-state.json
-.qboot_provision_state.json
 
 # Editor / OS
 .vscode/

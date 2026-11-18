@@ -57,8 +57,10 @@ pip install -e .[gui]        # PySide6 + pyocd
 python gui.py                # 或 python gui.py --check 检查依赖
 ```
 
-独立 exe：从 Releases 下载 `quilla-image.exe`，无需安装 Python。GUI 把上次
-路径存在 `~/.quilla_image/state.json`（删除即恢复默认），不会往 exe 目录写文件。
+独立 exe：从 Releases 下载 `quilla-image.exe`，无需安装 Python。设置保存在
+**exe 同目录**的 `state.json`（源码运行时在仓库根目录），工具连同配置可整体
+拷贝、带到别的机器；删除该文件即恢复默认。图标从内部资源目录读取，不在 exe
+旁边放只读资源。
 
 ## 边界
 

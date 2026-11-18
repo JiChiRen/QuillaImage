@@ -74,17 +74,35 @@ except ImportError as exc:                                  # pragma: no cover
     PYOCD_OK = False
     PYOCD_ERR = str(exc)
 
-DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "out", "combined.bin")
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-# 状态存用户目录，避免绿色版 exe 所在目录不可写；删除该文件恢复默认。
-STATE_DIR = os.path.join(os.path.expanduser("~"), ".quilla_image")
+def app_dir():
+    """Directory that holds the application (exe when frozen, source otherwise).
+
+    PyInstaller one-file sets ``__file__`` to a temporary extraction directory,
+    so use ``sys.executable`` when frozen. Config and default output must live
+    beside the real exe, not in a directory that vanishes on exit.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_DIR = app_dir()
+DEFAULT_OUT = os.path.join(APP_DIR, "out", "combined.bin")
+# 状态文件与应用同目录（删除即恢复默认）。
+STATE_DIR = APP_DIR
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
-# 路径/选项持久化文件（与工具同目录，删除即恢复默认）
+def resource_dir():
+    """Directory holding bundled read-only assets (PyInstaller extraction dir)."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 # 品牌图标资源：assets/quilla-favicon.svg 是 Quilla 品牌
 # 的副本；quilla.ico 由 make_icon.py 生成，供打包/快捷方式使用。
-ICON_SVG = os.path.join(APP_DIR, "assets", "quilla-favicon.svg")
-ICON_ICO = os.path.join(APP_DIR, "quilla.ico")
+# 图标随包打进 _MEIxxxx，路径与可写的配置目录分开。
+ICON_SVG = os.path.join(resource_dir(), "assets", "quilla-favicon.svg")
+ICON_ICO = os.path.join(resource_dir(), "assets", "quilla.ico")
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 

@@ -80,12 +80,16 @@ def main(argv=None) -> int:
         "--hidden-import", "PySide6.QtGui",
         "--hidden-import", "PySide6.QtWidgets",
         "--hidden-import", "PySide6.QtCore",
-        # pyocd loads target/pack backends lazily.
+        # pyocd loads target/pack backends lazily, and its CMSIS-DAP sequence
+        # parser reads sequences.lark from disk at import time. Both the
+        # pyocd data files and lark's grammars must be bundled.
         "--hidden-import", "pyocd.core.helpers",
         "--hidden-import", "pyocd.flash.file_programmer",
         "--hidden-import", "pyocd.target",
         "--hidden-import", "pyocd.pack",
         "--hidden-import", "pyocd.board",
+        "--collect-data", "pyocd",
+        "--collect-data", "lark",
         "--exclude-module", "numpy",
         "--exclude-module", "PIL",
         "--exclude-module", "pytest",
@@ -109,6 +113,20 @@ def main(argv=None) -> int:
     if not os.path.isfile(out):
         raise SystemExit("[build] expected output missing: %s" % out)
     print("[build] %-20s %8.1f KiB" % (exe, os.path.getsize(out) / 1024.0))
+
+    # LGPLv3 compliance: the Qt dynamic libraries are bundled unmodified;
+    # ship their license texts and the Qt notice next to the executable.
+    import shutil as _shutil
+    licenses = os.path.join(DIST, "licenses")
+    os.makedirs(licenses, exist_ok=True)
+    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
+        src = os.path.join(ROOT, "licenses", name)
+        if os.path.isfile(src):
+            _shutil.copyfile(src, os.path.join(licenses, name))
+    notice = os.path.join(ROOT, "LICENSES-Qt.txt")
+    if os.path.isfile(notice):
+        _shutil.copyfile(notice, os.path.join(DIST, "LICENSES-Qt.txt"))
+    print("[build] Qt LGPL/GPL license texts copied to dist/licenses/")
     return 0
 
 

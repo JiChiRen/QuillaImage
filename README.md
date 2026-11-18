@@ -75,6 +75,13 @@ the executable's directory.
 
 ## License
 
-Apache-2.0 (see [LICENSE](LICENSE)). The vendored Ed25519 signer is identical
-to the one in [Quilla](https://github.com/JiChiRen/Quilla) (`tools/quilla_ed25519_sign.py`);
-see [NOTICE](NOTICE).
+QuillaImage itself is Apache-2.0 (see [LICENSE](LICENSE)). The vendored
+Ed25519 signer is identical to the one in [Quilla](https://github.com/JiChiRen/Quilla)
+(`tools/quilla_ed25519_sign.py`); see [NOTICE](NOTICE).
+
+The bundled executable ships unmodified **Qt 6 / PySide6 6.11.2** dynamic
+libraries under LGPLv3. No Qt library is patched or relinked. The binary
+distribution includes `LICENSES-Qt.txt` and the full `LGPL-3.0.txt` /
+`GPL-3.0.txt` texts in `dist/licenses/`; corresponding Qt source is linked
+in `LICENSES-Qt.txt`. See that file for the bundled DLL hashes and the
+library-replacement route permitted by LGPLv3 §4(d)(1).

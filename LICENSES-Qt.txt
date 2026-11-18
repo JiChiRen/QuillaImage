@@ -1,0 +1,46 @@
+QuillaImage — third-party license notices
+==========================================
+
+This distribution bundles PySide6 (Qt 6 for Python). Qt is licensed by
+The Qt Company under the GNU Lesser General Public License version 3
+(LGPLv3), with Qt-specific additional licensing available from Qt.
+
+1. The Qt dynamic libraries bundled in quilla-image.exe are unmodified,
+   stock binaries taken verbatim from the official PySide6 wheel
+   (PySide6 6.11.2). Their SHA-256 prefixes, as shipped in the wheel:
+
+     Qt6Core.dll     10363704 bytes  d6a3c37c5263c5d4...
+     Qt6Gui.dll       9546552 bytes  ae29b005f51b6850...
+     Qt6Widgets.dll   6497080 bytes  ff0df9e2e6827e03...
+     Qt6Svg.dll        609080 bytes  1eac8f7415b311a8...
+
+   PyInstaller only copies these files into the one-file archive; no
+   relinking, patching or binary modification is performed. The user may
+   replace them with an interface-compatible LGPL build as permitted by
+   LGPLv3 section 4(d)(1).
+
+2. Full license texts are included with the source distribution and with
+   the binary distribution (dist/licenses/):
+
+     licenses/LGPL-3.0.txt   GNU Lesser General Public License v3
+     licenses/GPL-3.0.txt    GNU General Public License v3
+                             (referenced by LGPLv3 section 4(b))
+
+3. Corresponding source for the bundled Qt libraries:
+
+     - PySide6 source: https://code.qt.io/cgit/pyside/pyside-setup.git/
+     - Qt 6 source:    https://code.qt.io/cgit/qt/qtbase.git/
+     - Mirror:         https://github.com/pyside/PySide6-setup
+                       https://github.com/qt/qtbase
+
+   The exact versions correspond to PySide6 6.11.2 as published on PyPI.
+   Qt and PySide6 are trademarks of The Qt Company and contributors.
+
+4. QuillaImage's own source is Apache-2.0 (LICENSE). The vendored Ed25519
+   signer is from Quilla (3-clause BSD); see NOTICE.
+
+5. Other build/runtime dependencies:
+     pyocd       BSD-3-Clause  https://github.com/pyocd/pyOCD
+     PyInstaller GPLv2+exception (build-time only) https://pyinstaller.org/
+
+No IEC 61508 / ISO 26262 certification or SIL level is claimed.

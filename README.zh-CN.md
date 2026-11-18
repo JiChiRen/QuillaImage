@@ -60,6 +60,12 @@ python gui.py                # 或 python gui.py --check 检查依赖
 
 ## 许可证
 
-Apache-2.0（见 [LICENSE](LICENSE)）。内置的 Ed25519 签名模块与
-[Quilla](https://github.com/JiChiRen/Quilla) 上游
+QuillaImage 自身采用 Apache-2.0（见 [LICENSE](LICENSE)）。内置 Ed25519
+签名模块与 [Quilla](https://github.com/JiChiRen/Quilla) 上游
 `tools/quilla_ed25519_sign.py` 逐字一致，见 [NOTICE](NOTICE)。
+
+随 exe 分发的 **Qt 6 / PySide6 6.11.2** 动态库按 LGPLv3 授权，均为官方
+原始二进制，**未做任何修改、未重新链接**。二进制分发包含 `LICENSES-Qt.txt`
+以及 `dist/licenses/` 下完整的 `LGPL-3.0.txt` / `GPL-3.0.txt` 文本；
+对应 Qt 源码获取地址见 `LICENSES-Qt.txt`。该文件同时列出各 DLL 哈希与
+LGPLv3 §4(d)(1) 允许的库替换途径。

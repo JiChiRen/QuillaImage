@@ -116,6 +116,17 @@ worker.done_log.emit("PY-TEST")
 check("gui-style lambda receives traceback",
       captured and "PY-TEST" in captured[0])
 
+# ---- friendly AssertionError translation (v1.1.7) ----
+from gui import _friendly_pyocd_error  # noqa: E402
+
+err = _friendly_pyocd_error(AssertionError(), "gd32f502cb", "some.pack")
+check("assert translated with guidance",
+      "flash 内存布局" in err and "gd32f502cb" in err, err[:60])
+err2 = _friendly_pyocd_error(ValueError("boom"), "x", "some.pack")
+check("non-assert passes through", "ValueError: boom" == err2, err2)
+err3 = _friendly_pyocd_error(AssertionError(), "gd32f502cb", "")
+check("assert without pack stays raw", err3 == "AssertionError: ", err3)
+
 print()
 if FAILS:
     print("FAILED:", FAILS)

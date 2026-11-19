@@ -306,13 +306,31 @@ class FlashWorker(QThread):
             self.done.emit(True, "烧录完成")
         except Exception as exc:                            # pragma: no cover
             self.log_line.emit(traceback.format_exc())
-            self.done.emit(False, str(exc))
+            self.done.emit(False, _friendly_pyocd_error(
+                exc, self.target, self.pack_path))
         finally:
             if owned and session is not None:
                 try:
                     session.close()
                 except Exception:
                     pass
+
+
+def _friendly_pyocd_error(exc: Exception, target: str, pack_path: str) -> str:
+    """把 pyocd 的裸异常翻译成操作员可执行的指引。
+
+    已知上游缺陷（pyocd 0.37~0.46.1 均实测复现，截至 2026-11 未修复）：
+    部分 CMSIS-Pack 的小容量型号（如 GD32F50x 的 128KB B 后缀）在
+    session.open() 构建 flash 子区域时触发 memory_map 的无消息
+    AssertionError，且连接中断可能导致探针从 USB 消失。
+    """
+    base = "%s: %s" % (type(exc).__name__, exc)
+    if isinstance(exc, AssertionError) and pack_path:
+        return (
+            "pyocd 无法构建型号 %s 的 flash 内存布局（CMSIS-Pack 兼容性缺陷，"
+            "已实测到 pyocd 0.46.1 仍未修复）。请手动选择与芯片实际容量一致的"
+            "型号（如大容量 GD32F502VE / CG）。" % (target or "未知"))
+    return base
 
 
 class IdentityWorker(QThread):
@@ -376,7 +394,8 @@ class IdentityWorker(QThread):
             ident = read_identity(session)
             self.done.emit(ident, "")
         except Exception as exc:
-            self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+            self.done.emit(None, _friendly_pyocd_error(
+                exc, self.target, self.pack_path))
             # AssertionError 等空消息异常只有堆栈才能定位；写日志不弹窗。
             self.done_log.emit(traceback.format_exc())
         finally:
@@ -431,7 +450,8 @@ class ConnWorker(QThread):
                     session.close()
                 except Exception:
                     pass
-            self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+            self.done.emit(None, _friendly_pyocd_error(
+                exc, self.target, self.pack_path))
             self.done_log.emit(traceback.format_exc())
 
 

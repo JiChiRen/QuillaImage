@@ -25,7 +25,34 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import traceback
+
+
+def _register_probe_plugins():
+    """显式注册内置 probe 插件到 pyocd 的 PROBE_CLASSES。
+
+    PyInstaller drops package entry-point metadata, so pyocd's
+    load_plugin_classes_of_type('pyocd.probe', ...) sees no plugins and
+    PROBE_CLASSES stays empty -> no probes are ever enumerated. Register
+    the built-in probe plugins explicitly (same classes as the entry
+    points in pyocd's dist-info). Idempotent; existing entries are kept.
+    """
+    from pyocd.probe.aggregator import PROBE_CLASSES
+    if PROBE_CLASSES:
+        return
+    from pyocd.probe.cmsis_dap_probe import CMSISDAPProbePlugin
+    from pyocd.probe.jlink_probe import JLinkProbePlugin
+    from pyocd.probe.picoprobe import PicoprobePlugin
+    from pyocd.probe.stlink_probe import StlinkProbePlugin
+    from pyocd.probe.tcp_client_probe import TCPClientProbePlugin
+    for _plugin in (CMSISDAPProbePlugin, JLinkProbePlugin,
+                    PicoprobePlugin, StlinkProbePlugin,
+                    TCPClientProbePlugin):
+        _p = _plugin()
+        if _p.should_load():
+            PROBE_CLASSES[_p.name] = _p.load()
+
 
 # 无界面自检：不导入 Qt，便于在没装 PySide6 的机器上确认核心与依赖状态。
 if "--check" in sys.argv or "--probe-check" in sys.argv:
@@ -43,7 +70,10 @@ if "--check" in sys.argv or "--probe-check" in sys.argv:
     if "--probe-check" in sys.argv:
         # Verify probe enumeration in the SAME frozen runtime the GUI uses.
         # Useful for diagnosing a "no probe" list without clicking the GUI.
+        # Plugin registration must happen here too: --probe-check exits
+        # before _ensure_pyocd() would run in the GUI path.
         try:
+            _register_probe_plugins()
             from pyocd.core.helpers import ConnectHelper
             from pyocd.probe.pydapaccess import dap_access_cmsis_dap as _dac
             print("v1 backend:", _dac.USB_BACKEND, "v2 backend:", _dac.USB_BACKEND_V2)
@@ -66,8 +96,8 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTabWidget,
-        QVBoxLayout, QWidget,
+        QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplashScreen,
+        QTabWidget, QVBoxLayout, QWidget,
     )
 except ImportError:
     print("缺少 PySide6，无法启动图形界面。请先执行：")
@@ -83,34 +113,38 @@ except ImportError:                                         # pragma: no cover
 
 from package import image as core
 
-try:
-    from pyocd.core.helpers import ConnectHelper
-    from pyocd.flash.file_programmer import FileProgrammer
+# pyocd 导入实测约 5 s，是"打开工具 6 秒没反应"的最大头，且发生在窗口
+# 出现之前。改为惰性导入：首次用到探针功能（枚举 / 读型号 / 烧录）时
+# 在后台线程导入并注册 probe 插件，窗口立即出现。
+# _PY 状态机：None = 尚未导入；dict = 成功（存用到的符号）；str = 失败原因。
+_PY = None
+_PY_LOCK = threading.Lock()
 
-    # PyInstaller drops package entry-point metadata, so pyocd's
-    # load_plugin_classes_of_type('pyocd.probe', ...) sees no plugins and
-    # PROBE_CLASSES stays empty -> no probes are ever enumerated. Register
-    # the built-in probe plugins explicitly (same classes as the entry
-    # points in pyocd's dist-info). Safe to call twice; the dict keys are
-    # stable.
-    from pyocd.probe.aggregator import PROBE_CLASSES
-    if not PROBE_CLASSES:
-        from pyocd.probe.cmsis_dap_probe import CMSISDAPProbePlugin
-        from pyocd.probe.jlink_probe import JLinkProbePlugin
-        from pyocd.probe.picoprobe import PicoprobePlugin
-        from pyocd.probe.stlink_probe import StlinkProbePlugin
-        from pyocd.probe.tcp_client_probe import TCPClientProbePlugin
-        for _plugin in (CMSISDAPProbePlugin, JLinkProbePlugin,
-                        PicoprobePlugin, StlinkProbePlugin,
-                        TCPClientProbePlugin):
-            _p = _plugin()
-            if _p.should_load():
-                PROBE_CLASSES[_p.name] = _p.load()
-    PYOCD_OK = True
-    PYOCD_ERR = ""
-except ImportError as exc:                                  # pragma: no cover
-    PYOCD_OK = False
-    PYOCD_ERR = str(exc)
+
+def _ensure_pyocd():
+    """惰性导入 pyocd，返回 (modules, error)；成功时 error 为空串。
+
+    Probe plugin registration lives in _register_probe_plugins() (defined
+    near the top so the --probe-check CLI mode can share it). Safe to call
+    repeatedly; the result is cached, the dict keys are stable.
+    """
+    global _PY
+    if isinstance(_PY, (dict, str)):
+        return (_PY, "") if isinstance(_PY, dict) else (None, _PY)
+    with _PY_LOCK:
+        if isinstance(_PY, (dict, str)):
+            return (_PY, "") if isinstance(_PY, dict) else (None, _PY)
+        try:
+            from pyocd.core.helpers import ConnectHelper
+            from pyocd.flash.file_programmer import FileProgrammer
+
+            _register_probe_plugins()
+            _PY = {"ConnectHelper": ConnectHelper,
+                   "FileProgrammer": FileProgrammer}
+            return _PY, ""
+        except ImportError as exc:                          # pragma: no cover
+            _PY = str(exc)
+            return None, _PY
 
 def app_dir():
     """Directory that holds the application (exe when frozen, source otherwise).
@@ -203,12 +237,24 @@ class FlashWorker(QThread):
         self.chip_erase = chip_erase
 
     def _progress(self, value):
+        """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
+
+        旧代码直接 int(value)，全程只会得到 0（偶尔 1），进度条因此一直
+        卡 0% 直到结束跳 100%。换算成百分比并夹在 0..100。
+        """
         try:
-            self.progress_value.emit(int(value))
+            pct = int(float(value) * 100.0)
+            self.progress_value.emit(max(0, min(100, pct)))
         except (TypeError, ValueError):
             pass
 
     def run(self):
+        mods, err = _ensure_pyocd()
+        if mods is None:
+            self.done.emit(False, "未检测到 pyocd：%s" % err)
+            return
+        ConnectHelper = mods["ConnectHelper"]
+        FileProgrammer = mods["FileProgrammer"]
         session = None
         try:
             kwargs = {
@@ -273,7 +319,11 @@ class IdentityWorker(QThread):
 
     def run(self):
         try:
-            from pyocd.core.helpers import ConnectHelper
+            mods, err = _ensure_pyocd()
+            if mods is None:
+                self.done.emit(None, "未检测到 pyocd：%s" % err)
+                return
+            ConnectHelper = mods["ConnectHelper"]
             from mcu_identity import read_identity
             kwargs = {"blocking": False, "target_override": self.target or "py32f040xb"}
             if self.pack_path:
@@ -297,12 +347,35 @@ class IdentityWorker(QThread):
             self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
 
 
+class ProbeWorker(QThread):
+    """后台枚举调试探针。
+
+    枚举含 USB HID 扫描，首次调用还要等 pyocd 惰性导入完成（约 5 s），
+    放 UI 线程会让窗口冻结；期间下拉框显示"正在枚举探针"。
+    """
+
+    done = Signal(list, str)        # (probes, error_text)
+
+    def run(self):
+        mods, err = _ensure_pyocd()
+        if mods is None:
+            self.done.emit([], err)
+            return
+        try:
+            probes = mods["ConnectHelper"].get_all_connected_probes(
+                blocking=False)
+            self.done.emit(probes, "")
+        except Exception as exc:                            # pragma: no cover
+            self.done.emit([], str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("QuillaImage - QBOOT 镜像合并 / 烧录")
         self.resize(860, 680)
         self.worker = None
+        self._probe_worker = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -311,9 +384,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_log())
         self.setCentralWidget(root)
 
-        if not PYOCD_OK:
-            self.log("[提示] 未检测到 pyocd（%s），打包页可正常使用，"
-                     "烧录页需先 pip install pyocd" % PYOCD_ERR)
+        # pyocd 现为惰性导入，是否可用在首次枚举探针时报告（ProbeWorker）。
         self.log("烧录页整片 bin 固定从 0x%08X 起（已打包好，无需布局信息）；"
                  "布局参数仅打包页使用。" % core.FLASH_BASE)
         self._restore_state()
@@ -860,28 +931,33 @@ class MainWindow(QMainWindow):
             self.log("  [!] 未识别到变体串，请核对 QBOOT bin 是否串了构建产物")
 
     def _refresh_probes(self):
+        """后台枚举探针；完成前下拉框显示进行中提示，读型号按钮不可用。"""
+        if self._probe_worker is not None and self._probe_worker.isRunning():
+            return                                    # 正在枚举，忽略重入
         self.cmb_probe.clear()
-        if not PYOCD_OK:
-            self.cmb_probe.addItem("（pyocd 未安装）", "")
+        self.cmb_probe.addItem("正在枚举探针 ...", "")
+        self.btn_identity.setEnabled(False)
+        self._probe_worker = ProbeWorker()
+        self._probe_worker.done.connect(self._probes_done)
+        self._probe_worker.start()
+
+    def _probes_done(self, probes, error):
+        self.cmb_probe.clear()
+        if error:
+            self.cmb_probe.addItem("（pyocd 不可用：%s）" % error, "")
+            self.log("[提示] pyocd 未安装或加载失败（%s），打包页可正常使用，"
+                     "烧录页需先 pip install pyocd" % error)
             return
-        try:
-            probes = ConnectHelper.get_all_connected_probes(blocking=False)
-        except Exception as exc:                            # pragma: no cover
-            self.log("枚举探针失败：%s" % exc)
-            probes = []
         if not probes:
-            # 枚举失败不影响烧录：probe_id 为空时 FlashWorker 会用
+            # 枚举为空不影响烧录：probe_id 为空时 FlashWorker 会用
             # return_first=True 让 pyocd 自动取第一个探针。
             self.cmb_probe.addItem("（列表为空；烧录时自动取第一个探针）", "")
-            if hasattr(self, "btn_identity"):
-                self.btn_identity.setEnabled(False)
             return
         for p in probes:
             self.cmb_probe.addItem(
                 "%s  [%s]" % (p.description or p.product_name, p.unique_id),
                 p.unique_id)
-        if hasattr(self, "btn_identity"):
-            self.btn_identity.setEnabled(True)
+        self.btn_identity.setEnabled(True)
 
     def _target_ready(self) -> bool:
         """连探针前校验 target：没有 pack 时必须是 pyocd 内建型号。
@@ -897,17 +973,20 @@ class MainWindow(QMainWindow):
             return False
         if pack:
             return True
-        try:
-            from pyocd.target import TARGET
-            if target not in TARGET:
-                QMessageBox.warning(
-                    self, "需要 CMSIS Pack",
-                    "目标 %r 不是 pyocd 内建型号。\n"
-                    "请在公共区导入对应 CMSIS Pack，或手输一个内建型号\n"
-                    "（pyocd list --targets 可查看）。" % target)
-                return False
-        except ImportError:
-            pass
+        mods, err = _ensure_pyocd()
+        if mods is None:
+            QMessageBox.warning(self, "pyocd 不可用",
+                                "未检测到 pyocd（%s），无法校验目标型号。\n"
+                                "请先执行：pip install pyocd" % err)
+            return False
+        from pyocd.target import TARGET
+        if target not in TARGET:
+            QMessageBox.warning(
+                self, "需要 CMSIS Pack",
+                "目标 %r 不是 pyocd 内建型号。\n"
+                "请在公共区导入对应 CMSIS Pack，或手输一个内建型号\n"
+                "（pyocd list --targets 可查看）。" % target)
+            return False
         return True
 
     def _do_identity(self):
@@ -968,10 +1047,11 @@ class MainWindow(QMainWindow):
         self.log("MCU 型号读取完成：\n" + ident.summary())
 
     def _do_flash(self):
-        if not PYOCD_OK:
+        mods, err = _ensure_pyocd()
+        if mods is None:
             QMessageBox.critical(
                 self, "缺少依赖",
-                "未检测到 pyocd，请先执行：pip install pyocd\n\n%s" % PYOCD_ERR)
+                "未检测到 pyocd，请先执行：pip install pyocd\n\n%s" % err)
             return
         if self.worker is not None and self.worker.isRunning():
             return
@@ -1097,10 +1177,18 @@ def main() -> int:
     icon = quilla_icon()
     if icon is not None:
         app.setWindowIcon(icon)
+    # 启动画面：pyocd 已改为惰性导入（约 5 s 的等待移到首次用探针时），
+    # 窗口构建本身很快，但仍给用户一个明确的"正在打开"反馈，
+    # 避免双击 exe 后几秒白屏让人以为没点开。
+    splash = QSplashScreen()
+    splash.setFixedSize(340, 140)
+    splash.showMessage("正在启动 QuillaImage ...",
+                       Qt.AlignCenter, Qt.darkGray)
+    splash.show()
+    app.processEvents()
     win = MainWindow()
-    if icon is not None:
-        win.setWindowIcon(icon)
     win.show()
+    splash.finish(win)
     return app.exec()
 
 

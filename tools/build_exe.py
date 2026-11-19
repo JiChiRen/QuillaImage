@@ -204,6 +204,14 @@ def main(argv=None) -> int:
     if os.path.isfile(svg):
         sep = ";" if os.name == "nt" else ":"
         args += ["--add-data", "%s%sassets" % (svg, sep)]
+    # package/image.py 的 _load_sign_tool() 在运行时把 package/ 目录插进
+    # sys.path 再 import ed25519_sign——PyInstaller 的静态分析看不见这种
+    # 动态导入，纯模块又只进 PYZ 不落盘，冻结后 SEALED/SEC 出厂签名会
+    # 报"找不到内置签名模块"。把源文件按原相对路径放进 _internal/package。
+    sign_mod = os.path.join(ROOT, "package", "ed25519_sign.py")
+    if os.path.isfile(sign_mod):
+        sep = ";" if os.name == "nt" else ":"
+        args += ["--add-data", "%s%spackage" % (sign_mod, sep)]
 
     print("[build] %s -> %s" % ("quilla-image", os.path.join(app_dir, exe)))
     # Remove stale one-file artifacts and the previous onedir tree so the

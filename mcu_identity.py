@@ -56,8 +56,8 @@ class McuIdentity:
     def summary(self) -> str:
         lines = []
         if self.part_number:
-            lines.append("目标定义型号 : %s %s" % (
-                self.vendor, self.part_number).strip())
+            lines.append(("目标定义型号 : %s %s" % (
+                self.vendor, self.part_number)).strip())
         if self.dp_idcode:
             lines.append("DP IDCODE : 0x%08X%s" % (
                 self.dp_idcode,

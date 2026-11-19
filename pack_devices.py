@@ -54,23 +54,17 @@ def _pyocd_target_names():
 
 
 def _match_target(part_number: str, vendor: str, known: set) -> str:
-    """Best-effort match of a pack part number to a pyocd target name.
+    """Return the pyocd target_override name for a pack device.
 
-    pyocd target names are typically lowercase part numbers (e.g.
-    "py32f040xb"). Try the exact lowercase part number first, then a
-    vendor-prefixed form. Return "" when nothing matches — the operator
-    then keeps manual control instead of us guessing.
+    With a CMSIS-Pack loaded, pyocd accepts the pack's part number
+    (lowercased) as target_override and generates the target from the pack
+    — e.g. GD32F50x packs are not in pyocd's builtin TARGET dict at all.
+    So the part number itself is the correct candidate, not a lookup in
+    the builtin dict. ``known`` is kept for API compatibility / future use.
     """
     if not part_number:
         return ""
-    pn = part_number.strip().lower()
-    if pn in known:
-        return pn
-    # Some pyocd targets drop the vendor prefix or package suffix.
-    for cand in (pn.rstrip("abcdefghijklmnopqrstuvwxyz"), pn.split("x")[0]):
-        if cand and cand in known:
-            return cand
-    return ""
+    return part_number.strip().lower()
 
 
 def load_pack_devices(pack_path: str) -> list:
@@ -115,7 +109,10 @@ def selftest() -> None:
     known = {"py32f040xb", "gd32f502ve"}
     assert _match_target("PY32F040xB", "", known) == "py32f040xb"
     assert _match_target("GD32F502VE", "", known) == "gd32f502ve"
-    assert _match_target("UnknownMCU123", "", known) == ""
+    # Not in pyocd builtin dict: still the pack part number, which pyocd
+    # uses to generate a target from the loaded pack.
+    assert _match_target("GD32F502CE", "", known) == "gd32f502ce"
+    assert _match_target("", "", known) == ""
     dev = PackDevice("TEST", 0x20000, 0x4000, 0x20000000, "", "", "TEST")
     g = dev.geometry()
     assert g["flash_size"] == 0x20000 and g["ram_size"] == 0x4000

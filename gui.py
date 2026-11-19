@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 状态持久化
     _STATE_KEYS = (
-        "flash_image", "target", "boot", "app", "key",
+        "flash_image", "boot", "app", "key",
         "export_out", "meta_out", "meta_base", "app_start", "chip_pack",
     )
 
@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
         state = {
             "flash_image": self.ed_flash_image.text().strip(),
             "pack": self.ed_chip_pack.text().strip(),
-            "target": self.ed_target.text().strip(),
+            "target": self._mcu_target(),
             "boot": self.ed_boot.text().strip(),
             "app": self.ed_app.text().strip(),
             "key": self.ed_key.text().strip(),
@@ -386,10 +386,8 @@ class MainWindow(QMainWindow):
                 self.cmb_mcu.setCurrentIndex(idx if idx >= 0 else 0)
                 self.cmb_mcu.blockSignals(False)
                 self._on_mcu_changed()
-                # 存档里的 target 优先（用户可能手动改过）
-                saved_target = state.get("target", "")
-                if saved_target:
-                    self.ed_target.setText(saved_target)
+                # pack 推导的 target 是权威的（pyocd 从 pack 生成 target），
+                # 不用存档里可能已过时的 target 覆盖它。用户仍可随时手改。
             except Exception as exc:
                 self.log("[提示] 恢复 CMSIS Pack 失败（%s）。" % exc)
         if "version" in state:
@@ -431,19 +429,18 @@ class MainWindow(QMainWindow):
         pr.setContentsMargins(0, 0, 0, 0)
         pr.addWidget(self.ed_chip_pack, 1); pr.addWidget(btn_pack)
 
+        # MCU 型号就是 pyocd target_override（pack 的 part_number 小写），
+        # 同一个东西不分两栏。可编辑：导入 pack 后下拉选，没导入时可手输。
         self.cmb_mcu = QComboBox()
         self.cmb_mcu.setMinimumWidth(300)
+        self.cmb_mcu.setEditable(True)
+        self.cmb_mcu.setEditText("py32f040xb")
         self.cmb_mcu.currentIndexChanged.connect(self._on_mcu_changed)
-        self.lbl_chip_geo = QLabel("未选择芯片；可从 Pack 导入，或用预设芯片。")
-
-        # pyocd target override: MCU 型号来自 Pack，但 pyocd 未必内建同款
-        # target（如 GD32E23x 全系列无内建），此时必须能手输。
-        self.ed_target = QLineEdit("py32f040xb")
+        self.lbl_chip_geo = QLabel("未选择芯片；可从 Pack 导入，或直接输入型号。")
 
         form.addRow("CMSIS Pack:", prow)
-        form.addRow("MCU 型号:", self.cmb_mcu)
+        form.addRow("MCU 型号 / pyocd 目标:", self.cmb_mcu)
         form.addRow("", self.lbl_chip_geo)
-        form.addRow("pyocd 目标:", self.ed_target)
         return box
 
     def _pick_chip_pack(self):
@@ -489,14 +486,18 @@ class MainWindow(QMainWindow):
         d = self.selected_device
         geo = "Flash %d KiB / RAM %d KiB @ 0x%08X" % (
             d.flash_size // 1024, d.ram_size // 1024, d.ram_start)
-        tgt = d.target_name or "需手动确认"
-        self.lbl_chip_geo.setText("%s | pyocd target: %s" % (geo, tgt))
-        # 烧录页 target 名：只有 pyocd 内建匹配才自动填，否则留给用户
-        if d.target_name and hasattr(self, "ed_target"):
-            self.ed_target.setText(d.target_name)
+        # 型号本身（currentData）就是 pyocd target，不再单独显示一份。
+        self.lbl_chip_geo.setText(geo + " | 已就绪，可打包 / 烧录")
         # 打包页布局：按选中的 MCU 几何推导 META/APP 起址仍用默认偏移，
         # image.py 打包时会用 geometry 校验；这里只更新显示。
         self._save_state()
+
+    def _mcu_target(self) -> str:
+        """当前 MCU 型号即 pyocd target_override，同一个字段。"""
+        data = self.cmb_mcu.currentData()
+        if data:
+            return str(data).strip().lower()
+        return self.cmb_mcu.currentText().strip().lower()
 
     def _chip_geometry(self) -> dict | None:
         return self.selected_device.geometry() if self.selected_device else None
@@ -882,16 +883,46 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_identity"):
             self.btn_identity.setEnabled(True)
 
+    def _target_ready(self) -> bool:
+        """连探针前校验 target：没有 pack 时必须是 pyocd 内建型号。
+
+        py32f040xb 不是 pyocd 内建 target，必须靠 CMSIS pack 提供；
+        空有默认值而不导入 pack 会抛晦涩的 TargetSupportError。
+        """
+        target = self._mcu_target()
+        pack = self.ed_chip_pack.text().strip()
+        if not target:
+            QMessageBox.warning(self, "目标型号未填",
+                                "请在公共区选择 MCU 型号或手输 pyocd 目标。")
+            return False
+        if pack:
+            return True
+        try:
+            from pyocd.target import TARGET
+            if target not in TARGET:
+                QMessageBox.warning(
+                    self, "需要 CMSIS Pack",
+                    "目标 %r 不是 pyocd 内建型号。\n"
+                    "请在公共区导入对应 CMSIS Pack，或手输一个内建型号\n"
+                    "（pyocd list --targets 可查看）。" % target)
+                return False
+        except ImportError:
+            pass
+        return True
+
     def _do_identity(self):
         """连上探针后读取芯片标识，让用户确认型号再继续烧录。"""
         if self.worker is not None and getattr(self.worker, "isRunning", lambda: False)():
             QMessageBox.information(self, "忙", "上一次操作还在进行中。")
             return
+        if not self._target_ready():
+            self.btn_identity.setEnabled(False)
+            return
         probe_id = self.cmb_probe.currentData() or ""
         self.btn_identity.setEnabled(False)
         self.log("读取 MCU 型号 ...")
         self.identity_worker = IdentityWorker(
-            probe_id, self.ed_target.text().strip(),
+            probe_id, self._mcu_target(),
             self.ed_chip_pack.text().strip())
         self.identity_worker.done.connect(self._identity_done)
         self.identity_worker.start()
@@ -903,20 +934,37 @@ class MainWindow(QMainWindow):
             self.log("读取 MCU 型号失败：%s" % error)
             return
         body = ident.summary()
-        # 若已导入 Pack 且读到的 part_number 在 Pack 中，提示匹配型号
-        matched = [d for d in self.pack_devices
-                   if d.part_number.lower() == (ident.part_number or "").lower()]
-        if len(matched) == 1:
-            d = matched[0]
-            body += "\n\nPack 中唯一匹配型号：%s" % d.label
-            self.cmb_mcu.setCurrentIndex(self.cmb_mcu.findData(d.part_number))
-        elif matched:
-            body += "\n\nPack 中有 %d 个同名型号，请在公共区确认。" % len(matched)
+        read_model = (ident.part_number or "").strip()
+        # 读到型号且有回值：弹窗问用户是否采用，避免手动选错。
+        # 只有 pyocd target 自己报告的型号才算数；原始 ID 不用来猜型号。
+        if read_model:
+            matched = [d for d in self.pack_devices
+                       if d.part_number.lower() == read_model.lower()]
+            body += "\n\npyocd 报告目标型号：%s" % read_model
+            if len(matched) == 1:
+                body += "\n已导入 Pack 中对应：%s" % matched[0].label
+            body += ("\n\n当前公共区选择：%s\n是否改用读到的型号 %s？"
+                     % (self._mcu_target(), read_model))
+            ans = QMessageBox.question(
+                self, "芯片型号确认", body,
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans == QMessageBox.Yes:
+                idx = self.cmb_mcu.findData(read_model)
+                if idx >= 0:
+                    self.cmb_mcu.setCurrentIndex(idx)
+                    self.log("已按读取结果切换型号：%s" % read_model)
+                else:
+                    self.cmb_mcu.setEditText(read_model.lower())
+                    self.log("已按读取结果填写型号：%s" % read_model)
+            else:
+                self.log("用户保留当前型号：%s" % self._mcu_target())
         else:
-            body += ("\n\n未能与已导入 Pack 唯一匹配。请勿仅凭 ID 猜测型号，"
-                     "请在公共区手动选择后继续。")
-        body += "\n\n当前芯片型号如上方所示，确认后继续烧录。"
-        QMessageBox.information(self, "芯片型号", body)
+            # 没有型号回值：只展示原始 ID，不猜型号、不做选择
+            body += ("\n\npyocd 未报告具体型号（只读到上面的原始 ID）。"
+                     "请在公共区手动确认型号后继续。")
+            QMessageBox.information(self, "芯片型号", body)
+            self.log("MCU 型号读取完成（无型号回值）：\n" + ident.summary())
+            return
         self.log("MCU 型号读取完成：\n" + ident.summary())
 
     def _do_flash(self):
@@ -948,12 +996,14 @@ class MainWindow(QMainWindow):
                 "或在 ② 打包页重新导出。" % exc)
             self.log("烧前校验失败：%s" % exc)
             return
+        if not self._target_ready():
+            return
         self.progress.setValue(0)
         self.btn_flash.setEnabled(False)
         self.worker = FlashWorker(
             image_path,
             self.cmb_probe.currentData() or "",
-            self.ed_target.text().strip(),
+            self._mcu_target(),
             self.ed_chip_pack.text().strip(),
             self.cb_erase.isChecked(),
         )

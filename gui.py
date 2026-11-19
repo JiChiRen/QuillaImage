@@ -329,6 +329,7 @@ class IdentityWorker(QThread):
     """
 
     done = Signal(object, str)      # (McuIdentity, error_text)
+    done_log = Signal(str)          # extra traceback for the log pane
 
     def __init__(self, probe_id: str, target: str, pack_path: str,
                  session=None, parent=None):
@@ -376,6 +377,8 @@ class IdentityWorker(QThread):
             self.done.emit(ident, "")
         except Exception as exc:
             self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+            # AssertionError 等空消息异常只有堆栈才能定位；写日志不弹窗。
+            self.done_log.emit(traceback.format_exc())
         finally:
             if owned and session is not None:
                 try:
@@ -388,6 +391,7 @@ class ConnWorker(QThread):
     """显式连接探针并持有 session（点"断开探针"才释放）。"""
 
     done = Signal(object, str)      # (Session or None, error_text)
+    done_log = Signal(str)          # extra traceback for the log pane
 
     def __init__(self, probe_id: str, target: str, pack_path: str, parent=None):
         super().__init__(parent)
@@ -428,6 +432,7 @@ class ConnWorker(QThread):
                 except Exception:
                     pass
             self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+            self.done_log.emit(traceback.format_exc())
 
 
 class DiscWorker(QThread):
@@ -644,12 +649,35 @@ class MainWindow(QMainWindow):
             return
         self.ed_chip_pack.setText(path)
         self.pack_devices = devices
+        # 保持导入前的型号选择：下拉重建后当前项会落到排序第一（可能是
+        # 128KB 小容量型号，pyocd 对部分这类型号构建 target 会断言失败
+        # 并把探针拖下线）。原型号在新 pack 里存在就选回去，恢复不了
+        # 才落到第一项，并把选中项明确写进日志。
+        prev_target = self._mcu_target()
         self.cmb_mcu.blockSignals(True)
         self.cmb_mcu.clear()
         for d in devices:
             self.cmb_mcu.addItem(d.label, d.part_number)
+        restore = self.cmb_mcu.findData(prev_target) if prev_target else -1
+        if restore < 0 and prev_target:
+            # findData is exact-match; part_number stored with original
+            # casing vs prev_target lowercased. Hand-rolled case-insensitive
+            # scan avoids the Qt.MatchFlag enum relocation across PySide6
+            # versions (6.x moved it to Qt.MatchFlag.MatchCaseInsensitive).
+            for i in range(self.cmb_mcu.count()):
+                if self.cmb_mcu.itemData(i).lower() == prev_target:
+                    restore = i
+                    break
+        if restore >= 0:
+            self.cmb_mcu.setCurrentIndex(restore)
         self.cmb_mcu.blockSignals(False)
         self._on_mcu_changed()
+        cur = self._mcu_target()
+        if prev_target and cur != prev_target:
+            self.log("[提示] 原型号 %s 不在此 Pack 中，已切换到 %s；"
+                     "请确认后再读取型号 / 烧录。" % (prev_target, cur))
+        else:
+            self.log("当前选中型号：%s" % cur)
         self.log("Pack 已导入：%s（%d 个芯片）" % (path, len(devices)))
         self._save_state()
 
@@ -675,11 +703,18 @@ class MainWindow(QMainWindow):
         self._save_state()
 
     def _mcu_target(self) -> str:
-        """当前 MCU 型号即 pyocd target_override，同一个字段。"""
+        """当前 MCU 型号即 pyocd target_override，同一个字段。
+
+        Editable combobox 陷阱：手输新值时 currentData() 仍返回旧下拉项的
+        data。只有"编辑文本 == 选中项文本"（未手动改动）才信任 data，
+        否则以编辑文本为准。
+        """
+        text = self.cmb_mcu.currentText().strip()
+        idx = self.cmb_mcu.currentIndex()
         data = self.cmb_mcu.currentData()
-        if data:
+        if idx >= 0 and data and text == self.cmb_mcu.itemText(idx):
             return str(data).strip().lower()
-        return self.cmb_mcu.currentText().strip().lower()
+        return text.lower()
 
     def _chip_geometry(self) -> dict | None:
         return self.selected_device.geometry() if self.selected_device else None
@@ -1103,6 +1138,8 @@ class MainWindow(QMainWindow):
         self.log("连接探针（attach 模式，不打断目标运行）...")
         self.conn_worker = ConnWorker(
             probe_id, self._mcu_target(), self.ed_chip_pack.text().strip())
+        self.conn_worker.done_log.connect(
+            lambda tb: self.log("[堆栈]\n" + tb.strip()))
         self.conn_worker.done.connect(self._connect_done)
         self.conn_worker.start()
 
@@ -1199,24 +1236,28 @@ class MainWindow(QMainWindow):
             probe_id, self._mcu_target(),
             self.ed_chip_pack.text().strip(),
             session=self._held_session)
+        self.identity_worker.done_log.connect(
+            lambda tb: self.log("[堆栈]\n" + tb.strip()))
         self.identity_worker.done.connect(self._identity_done)
         self.identity_worker.start()
 
     def _identity_done(self, ident, error):
         self.btn_identity.setEnabled(True)
         if error or ident is None:
-            hint = ""
-            if self._held_session is not None:
-                # 持有连接下读取失败：链路可能已被目标板拖挂（上电初期
-                # SWD 时序不稳）。不自动 close——close 对死设备也可能卡，
-                # 交给用户点"断开探针"，那里有后台线程兜底。
-                hint = ("\n\n探针可能已掉线（板上电初期 SWD 握手易失败）。"
-                        "请点『断开探针』后重新连接；若刷新后列表为空，"
-                        "需要重新插拔 USB。")
+            target = self._mcu_target() or "(未选型号)"
+            hint = ("\n\n目标型号：%s" % target)
+            # AssertionError 无消息（pyocd 对部分 pack 芯片的兼容缺陷，
+            # 如 GD32F50x pack 的 128KB 型号），堆栈已写入日志。
+            if error.startswith("AssertionError"):
+                hint += ("\n\npyocd 在创建该型号的 target 时断言失败"
+                         "（pack 数据兼容缺陷，完整堆栈见日志）。"
+                         "请换用同系列其它容量型号。")
+            hint += ("\n\n探针可能已掉线（assert 发生在连接中途，"
+                     "半初始化的会话未能干净释放）。请刷新探针列表；"
+                     "若列表为空需重新插拔 USB。")
             QMessageBox.critical(self, "读取失败", (error or "未知错误") + hint)
-            self.log("读取 MCU 型号失败：%s" % error)
-            if self._held_session is None:
-                self._refresh_probes()   # 瞬时模式失败也刷新一次列表
+            self.log("读取 MCU 型号失败（target=%s）：%s" % (target, error))
+            self._refresh_probes()
             return
         body = ident.summary()
         read_model = (ident.part_number or "").strip()

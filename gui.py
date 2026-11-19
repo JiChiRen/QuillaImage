@@ -228,13 +228,15 @@ class FlashWorker(QThread):
     done = Signal(bool, str)
 
     def __init__(self, image_path: str, probe_id: str, target: str,
-                 pack_path: str, chip_erase: bool, parent=None):
+                 pack_path: str, chip_erase: bool, session=None, parent=None):
         super().__init__(parent)
         self.image_path = image_path
         self.probe_id = probe_id
         self.target = target
         self.pack_path = pack_path
         self.chip_erase = chip_erase
+        self.session = session          # 复用显式连接的 session（不为 None 时）
+        self.used_held = session is not None
 
     def _progress(self, value):
         """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
@@ -256,25 +258,32 @@ class FlashWorker(QThread):
         ConnectHelper = mods["ConnectHelper"]
         FileProgrammer = mods["FileProgrammer"]
         session = None
+        # 复用显式连接的 session 时由 UI 负责（断开按钮/closeEvent），
+        # 这里不 close；瞬时模式照旧用完即关。
+        owned = self.session is None
         try:
-            kwargs = {
-                "blocking": False,
-                "target_override": self.target or "py32f040xb",
-            }
-            if self.pack_path:
-                kwargs["pack"] = self.pack_path
-            if self.probe_id:
-                kwargs["unique_id"] = self.probe_id
-                kwargs["return_first"] = False
+            if owned:
+                kwargs = {
+                    "blocking": False,
+                    "target_override": self.target or "py32f040xb",
+                }
+                if self.pack_path:
+                    kwargs["pack"] = self.pack_path
+                if self.probe_id:
+                    kwargs["unique_id"] = self.probe_id
+                    kwargs["return_first"] = False
+                else:
+                    kwargs["return_first"] = True
+
+                self.log_line.emit("连接调试探针 ...")
+                session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                if session is None:
+                    raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
+
+                session.open()
             else:
-                kwargs["return_first"] = True
-
-            self.log_line.emit("连接调试探针 ...")
-            session = ConnectHelper.session_with_chosen_probe(**kwargs)
-            if session is None:
-                raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
-
-            session.open()
+                session = self.session
+                self.log_line.emit("使用已连接的探针 ...")
             # pyocd 0.37 的 chip_erase 只接受 'chip' / 'sector' / None，
             # 不接受布尔值（builder.erase 会抛 invalid chip_erase value）。
             erase_arg = "chip" if self.chip_erase else None
@@ -299,7 +308,7 @@ class FlashWorker(QThread):
             self.log_line.emit(traceback.format_exc())
             self.done.emit(False, str(exc))
         finally:
-            if session is not None:
+            if owned and session is not None:
                 try:
                     session.close()
                 except Exception:
@@ -307,9 +316,78 @@ class FlashWorker(QThread):
 
 
 class IdentityWorker(QThread):
-    """Read MCU identity from an attached probe without blocking the UI."""
+    """Read MCU identity from an attached probe without blocking the UI.
+
+    Session handling, two modes:
+      * session=None (transient): open -> read -> close, connect_mode
+        "attach" so we never halt the running target. DP IDCODE and
+        DBGMCU reads go through the DP / AHB-AP and do not need the CPU
+        halted; halting a just-powered-on board is the most likely trigger
+        for the "probe disappears after the first identity read" report.
+      * session=<held>: reuse the explicitly connected session, zero
+        extra USB/SWD handshake; never closed here (the owner disconnects).
+    """
 
     done = Signal(object, str)      # (McuIdentity, error_text)
+
+    def __init__(self, probe_id: str, target: str, pack_path: str,
+                 session=None, parent=None):
+        super().__init__(parent)
+        self.probe_id = probe_id
+        self.target = target
+        self.pack_path = pack_path
+        self.session = session
+
+    def run(self):
+        session = None
+        owned = False
+        try:
+            mods, err = _ensure_pyocd()
+            if mods is None:
+                self.done.emit(None, "未检测到 pyocd：%s" % err)
+                return
+            ConnectHelper = mods["ConnectHelper"]
+            from mcu_identity import read_identity
+            if self.session is not None:
+                session = self.session
+            else:
+                owned = True
+                kwargs = {
+                    "blocking": False,
+                    "target_override": self.target or "py32f040xb",
+                    # 读 DP IDCODE / DBGMCU 走 DP 与 AHB-AP，不需要 halt
+                    # 目标 CPU；默认 "halt" 会在 connect 时打断运行中的
+                    # 目标，上电初期最易诱发探针固件挂死。
+                    "connect_mode": "attach",
+                }
+                if self.pack_path:
+                    kwargs["pack"] = self.pack_path
+                if self.probe_id:
+                    kwargs["unique_id"] = self.probe_id
+                    kwargs["return_first"] = False
+                else:
+                    kwargs["return_first"] = True
+                session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                if session is None:
+                    self.done.emit(None, "未找到可用探针")
+                    return
+                session.open()
+            ident = read_identity(session)
+            self.done.emit(ident, "")
+        except Exception as exc:
+            self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+        finally:
+            if owned and session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+
+class ConnWorker(QThread):
+    """显式连接探针并持有 session（点"断开探针"才释放）。"""
+
+    done = Signal(object, str)      # (Session or None, error_text)
 
     def __init__(self, probe_id: str, target: str, pack_path: str, parent=None):
         super().__init__(parent)
@@ -318,14 +396,18 @@ class IdentityWorker(QThread):
         self.pack_path = pack_path
 
     def run(self):
+        mods, err = _ensure_pyocd()
+        if mods is None:
+            self.done.emit(None, "未检测到 pyocd：%s" % err)
+            return
+        ConnectHelper = mods["ConnectHelper"]
+        session = None
         try:
-            mods, err = _ensure_pyocd()
-            if mods is None:
-                self.done.emit(None, "未检测到 pyocd：%s" % err)
-                return
-            ConnectHelper = mods["ConnectHelper"]
-            from mcu_identity import read_identity
-            kwargs = {"blocking": False, "target_override": self.target or "py32f040xb"}
+            kwargs = {
+                "blocking": False,
+                "target_override": self.target or "py32f040xb",
+                "connect_mode": "attach",       # 与 IdentityWorker 同理由
+            }
             if self.pack_path:
                 kwargs["pack"] = self.pack_path
             if self.probe_id:
@@ -338,13 +420,32 @@ class IdentityWorker(QThread):
                 self.done.emit(None, "未找到可用探针")
                 return
             session.open()
-            try:
-                ident = read_identity(session)
-                self.done.emit(ident, "")
-            finally:
-                session.close()
+            self.done.emit(session, "")
         except Exception as exc:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
             self.done.emit(None, "%s: %s" % (type(exc).__name__, exc))
+
+
+class DiscWorker(QThread):
+    """后台关闭持有的 session——设备已死时 close 可能阻塞，不能放 UI 线程。"""
+
+    done = Signal(str)              # error_text ("" = clean)
+
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+        self.session = session
+
+    def run(self):
+        err = ""
+        try:
+            self.session.close()
+        except Exception as exc:                            # pragma: no cover
+            err = str(exc)
+        self.done.emit(err)
 
 
 class ProbeWorker(QThread):
@@ -376,6 +477,8 @@ class MainWindow(QMainWindow):
         self.resize(860, 680)
         self.worker = None
         self._probe_worker = None
+        self._held_session = None    # 显式连接的探针 session（"连接探针"持有）
+        self._held_meta = None       # (target, pack, probe_id) 连接时的快照
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -481,6 +584,14 @@ class MainWindow(QMainWindow):
         self.cb_seal.toggled.connect(self._save_state)
 
     def closeEvent(self, event):
+        # 释放显式连接的探针 session；设备已死时 close 可能慢，但关窗时
+        # 同步等待是可接受的（失败只吞异常，不让窗口关不掉）。
+        if self._held_session is not None:
+            try:
+                self._held_session.close()
+            except Exception:
+                pass
+            self._held_session = None
         self._save_state()
         super().closeEvent(event)
 
@@ -615,13 +726,20 @@ class MainWindow(QMainWindow):
 
         self.cmb_probe = QComboBox()
         self.cmb_probe.setMinimumWidth(320)
-        btn_refresh = QPushButton("刷新探针")
-        btn_refresh.clicked.connect(self._refresh_probes)
+        self.btn_refresh = QPushButton("刷新探针")
+        self.btn_refresh.clicked.connect(self._refresh_probes)
         self.btn_identity = QPushButton("从目标板读取 MCU 型号")
         self.btn_identity.setEnabled(False)   # 探针连上后才可用
         self.btn_identity.clicked.connect(self._do_identity)
+        # 显式连接/断开：连接后 session 由 GUI 持有，读型号与烧录复用，
+        # 不再每次操作都做一遍 SWD 握手（上电初期握手失败会让 WCH-Link
+        # 固件挂死、探针从 USB 消失，必须重新插拔）。
+        self.btn_conn = QPushButton("连接探针")
+        self.btn_conn.setEnabled(False)       # 枚举出探针后才可用
+        self.btn_conn.clicked.connect(self._toggle_conn)
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
-        r.addWidget(self.cmb_probe, 1); r.addWidget(btn_refresh)
+        r.addWidget(self.cmb_probe, 1); r.addWidget(self.btn_refresh)
+        r.addWidget(self.btn_conn)
         r.addWidget(self.btn_identity)
 
         self.cb_erase = QCheckBox("烧录前整片擦除（出厂首片建议勾选）")
@@ -952,12 +1070,88 @@ class MainWindow(QMainWindow):
             # 枚举为空不影响烧录：probe_id 为空时 FlashWorker 会用
             # return_first=True 让 pyocd 自动取第一个探针。
             self.cmb_probe.addItem("（列表为空；烧录时自动取第一个探针）", "")
+            self.btn_conn.setEnabled(False)
             return
         for p in probes:
             self.cmb_probe.addItem(
                 "%s  [%s]" % (p.description or p.product_name, p.unique_id),
                 p.unique_id)
         self.btn_identity.setEnabled(True)
+        self.btn_conn.setEnabled(self._held_session is None)
+
+    # ------------------------------------------------------------ 探针显式连接
+    def _toggle_conn(self):
+        if self._held_session is not None:
+            self._disconnect_probe()
+        else:
+            self._connect_probe()
+
+    def _connect_probe(self):
+        """显式打开并持有探针 session（connect_mode=attach，不 halt 目标）。"""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "忙", "上一次操作还在进行中。")
+            return
+        probe_id = self.cmb_probe.currentData() or ""
+        if not probe_id:
+            QMessageBox.warning(self, "未选择探针",
+                                "请先刷新并选择一个调试探针。")
+            return
+        if not self._target_ready():
+            return
+        self.btn_conn.setEnabled(False)
+        self.btn_conn.setText("连接中 ...")
+        self.log("连接探针（attach 模式，不打断目标运行）...")
+        self.conn_worker = ConnWorker(
+            probe_id, self._mcu_target(), self.ed_chip_pack.text().strip())
+        self.conn_worker.done.connect(self._connect_done)
+        self.conn_worker.start()
+
+    def _connect_done(self, session, error):
+        if session is None or error:
+            self.btn_conn.setText("连接探针")
+            self.btn_conn.setEnabled(True)
+            QMessageBox.critical(self, "连接失败", error or "未知错误")
+            self.log("探针连接失败：%s" % error)
+            # 探针可能已从总线消失（固件挂死重枚举），刷新一次列表。
+            self._refresh_probes()
+            return
+        self._held_session = session
+        self._held_meta = (self._mcu_target(),
+                           self.ed_chip_pack.text().strip(),
+                           self.cmb_probe.currentData() or "")
+        self._set_conn_state(True)
+        self.log("探针已连接并持有；读型号 / 烧录将复用本次连接。")
+
+    def _disconnect_probe(self):
+        """关闭持有的 session 并重新枚举。close 可能阻塞，放后台线程。"""
+        if self._held_session is None:
+            return
+        self.btn_conn.setEnabled(False)
+        self.btn_conn.setText("断开中 ...")
+        self.disc_worker = DiscWorker(self._held_session)
+        self.disc_worker.done.connect(self._disconnect_done)
+        self.disc_worker.start()
+
+    def _disconnect_done(self, error):
+        had = self._held_session is not None
+        self._held_session = None
+        self._held_meta = None
+        self._set_conn_state(False)
+        self.log("探针已断开。" if not error else
+                 "断开时出错（不影响重新连接）：%s" % error)
+        if had:
+            self._refresh_probes()
+
+    def _set_conn_state(self, connected: bool):
+        self.btn_conn.setText("断开探针" if connected else "连接探针")
+        self.btn_conn.setEnabled(True)
+        # 连接期间探针选择固定，不许换；刷新也无意义（枚举到的还是同一台）。
+        self.cmb_probe.setEnabled(not connected)
+        self.btn_refresh.setEnabled(not connected)
+        self.btn_identity.setEnabled(connected)
+        if not connected:
+            # 恢复到枚举结果决定的状态：有探针条目即可用。
+            self.btn_identity.setEnabled(bool(self.cmb_probe.currentData()))
 
     def _target_ready(self) -> bool:
         """连探针前校验 target：没有 pack 时必须是 pyocd 内建型号。
@@ -999,18 +1193,30 @@ class MainWindow(QMainWindow):
             return
         probe_id = self.cmb_probe.currentData() or ""
         self.btn_identity.setEnabled(False)
-        self.log("读取 MCU 型号 ...")
+        self.log("读取 MCU 型号 ..." +
+                 ("（复用已连接探针）" if self._held_session is not None else ""))
         self.identity_worker = IdentityWorker(
             probe_id, self._mcu_target(),
-            self.ed_chip_pack.text().strip())
+            self.ed_chip_pack.text().strip(),
+            session=self._held_session)
         self.identity_worker.done.connect(self._identity_done)
         self.identity_worker.start()
 
     def _identity_done(self, ident, error):
         self.btn_identity.setEnabled(True)
         if error or ident is None:
-            QMessageBox.critical(self, "读取失败", error or "未知错误")
+            hint = ""
+            if self._held_session is not None:
+                # 持有连接下读取失败：链路可能已被目标板拖挂（上电初期
+                # SWD 时序不稳）。不自动 close——close 对死设备也可能卡，
+                # 交给用户点"断开探针"，那里有后台线程兜底。
+                hint = ("\n\n探针可能已掉线（板上电初期 SWD 握手易失败）。"
+                        "请点『断开探针』后重新连接；若刷新后列表为空，"
+                        "需要重新插拔 USB。")
+            QMessageBox.critical(self, "读取失败", (error or "未知错误") + hint)
             self.log("读取 MCU 型号失败：%s" % error)
+            if self._held_session is None:
+                self._refresh_probes()   # 瞬时模式失败也刷新一次列表
             return
         body = ident.summary()
         read_model = (ident.part_number or "").strip()
@@ -1078,6 +1284,19 @@ class MainWindow(QMainWindow):
             return
         if not self._target_ready():
             return
+        # 复用显式连接的 session：target / pack 必须与连接时一致，
+        # 否则 session 的 target_override 已经固定，烧进去会张冠李戴。
+        use_held = None
+        if self._held_session is not None:
+            if self._held_meta != (self._mcu_target(),
+                                   self.ed_chip_pack.text().strip(),
+                                   self.cmb_probe.currentData() or ""):
+                QMessageBox.warning(
+                    self, "型号 / 探针已变更",
+                    "探针是用旧的型号 / 探针连接的（公共区或探针选择后来改过）。\n"
+                    "请先点『断开探针』再重新连接，或直接烧录（自动开关连接）。")
+                return
+            use_held = self._held_session
         self.progress.setValue(0)
         self.btn_flash.setEnabled(False)
         self.worker = FlashWorker(
@@ -1086,6 +1305,7 @@ class MainWindow(QMainWindow):
             self._mcu_target(),
             self.ed_chip_pack.text().strip(),
             self.cb_erase.isChecked(),
+            session=use_held,
         )
         self.worker.log_line.connect(self.log)
         self.worker.progress_value.connect(self.progress.setValue)
@@ -1099,6 +1319,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "完成", msg)
         else:
             QMessageBox.critical(self, "烧录失败", msg)
+        # 复用显式连接烧录后自动断开并重新枚举，恢复产线"烧完即收"状态。
+        if ok and self._held_session is not None:
+            self._disconnect_probe()
 
     def _do_export(self):
         out_path = self.ed_export_out.text().strip() or DEFAULT_OUT

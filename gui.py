@@ -136,11 +136,13 @@ def _ensure_pyocd():
             return (_PY, "") if isinstance(_PY, dict) else (None, _PY)
         try:
             from pyocd.core.helpers import ConnectHelper
+            from pyocd.core.exceptions import TransferError
             from pyocd.flash.file_programmer import FileProgrammer
 
             _register_probe_plugins()
             _PY = {"ConnectHelper": ConnectHelper,
-                   "FileProgrammer": FileProgrammer}
+                   "FileProgrammer": FileProgrammer,
+                   "TransferError": TransferError}
             return _PY, ""
         except ImportError as exc:                          # pragma: no cover
             _PY = str(exc)
@@ -257,63 +259,94 @@ class FlashWorker(QThread):
             return
         ConnectHelper = mods["ConnectHelper"]
         FileProgrammer = mods["FileProgrammer"]
-        session = None
+        TransferError = mods["TransferError"]
         # 复用显式连接的 session 时由 UI 负责（断开按钮/closeEvent），
         # 这里不 close；瞬时模式照旧用完即关。
         owned = self.session is None
-        try:
-            if owned:
-                kwargs = {
-                    "blocking": False,
-                    "target_override": self.target or "py32f040xb",
-                }
-                if self.pack_path:
-                    kwargs["pack"] = self.pack_path
-                if self.probe_id:
-                    kwargs["unique_id"] = self.probe_id
-                    kwargs["return_first"] = False
+        # Ali 上板实测（2026-11-19）：整片擦除期间偶发 SWD ACK FAULT
+        # （Unexpected ACK '5'），失败后手动重开一次会话即成功——瞬态
+        # 调试链路问题。瞬时模式自动用新会话重试 1 次；复用持有会话时
+        # 链路状态未知，不自动重试，交给操作员断开重连。
+        max_attempts = 2 if owned else 1
+        attempt = 0
+        while True:
+            attempt += 1
+            session = None
+            try:
+                if owned:
+                    kwargs = {
+                        "blocking": False,
+                        "target_override": self.target or "py32f040xb",
+                    }
+                    if self.pack_path:
+                        kwargs["pack"] = self.pack_path
+                    if self.probe_id:
+                        kwargs["unique_id"] = self.probe_id
+                        kwargs["return_first"] = False
+                    else:
+                        kwargs["return_first"] = True
+
+                    self.log_line.emit("连接调试探针 ...")
+                    session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                    if session is None:
+                        raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
+
+                    session.open()
                 else:
-                    kwargs["return_first"] = True
-
-                self.log_line.emit("连接调试探针 ...")
-                session = ConnectHelper.session_with_chosen_probe(**kwargs)
-                if session is None:
-                    raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
-
-                session.open()
-            else:
-                session = self.session
-                self.log_line.emit("使用已连接的探针 ...")
-            # pyocd 0.37 的 chip_erase 只接受 'chip' / 'sector' / None，
-            # 不接受布尔值（builder.erase 会抛 invalid chip_erase value）。
-            erase_arg = "chip" if self.chip_erase else None
-            self.log_line.emit(
-                "烧录 %s -> 0x%08X（整片擦除=%s）"
-                % (self.image_path, core.FLASH_BASE,
-                   "是" if self.chip_erase else "否")
-            )
-            FileProgrammer(
-                session,
-                chip_erase=erase_arg,
-                smart_flash=False,
-                trust_crc=False,
-                keep_unwritten=True,
-                no_reset=False,
-                progress=self._progress,
-            ).program(self.image_path, base_address=core.FLASH_BASE)
-            session.target.reset()
-            self.log_line.emit("烧录完成，已复位。")
-            self.done.emit(True, "烧录完成")
-        except Exception as exc:                            # pragma: no cover
-            self.log_line.emit(traceback.format_exc())
-            self.done.emit(False, _friendly_pyocd_error(
-                exc, self.target, self.pack_path))
-        finally:
-            if owned and session is not None:
-                try:
-                    session.close()
-                except Exception:
-                    pass
+                    session = self.session
+                    self.log_line.emit("使用已连接的探针 ...")
+                # pyocd 的 chip_erase 只接受 'chip' / 'sector' / None，
+                # 不接受布尔值（builder.erase 会抛 invalid chip_erase value）。
+                erase_arg = "chip" if self.chip_erase else None
+                self.log_line.emit(
+                    "烧录 %s -> 0x%08X（整片擦除=%s）"
+                    % (self.image_path, core.FLASH_BASE,
+                       "是" if self.chip_erase else "否")
+                )
+                if attempt > 1:
+                    self.progress_value.emit(0)
+                FileProgrammer(
+                    session,
+                    chip_erase=erase_arg,
+                    smart_flash=False,
+                    trust_crc=False,
+                    keep_unwritten=True,
+                    no_reset=False,
+                    progress=self._progress,
+                ).program(self.image_path, base_address=core.FLASH_BASE)
+                session.target.reset()
+                if attempt > 1:
+                    self.log_line.emit("（第 %d 次尝试成功）" % attempt)
+                self.log_line.emit("烧录完成，已复位。")
+                self.done.emit(True, "烧录完成")
+                return
+            except TransferError as exc:
+                self.log_line.emit(traceback.format_exc())
+                if attempt < max_attempts:
+                    self.log_line.emit(
+                        "SWD 通信失败（%s），正在用新会话自动重试 ..."
+                        % exc)
+                    continue                    # finally 负责关掉本次会话
+                if owned:
+                    self.done.emit(False, (
+                        "SWD 通信失败（%s）。已自动重试 1 次仍未成功："
+                        "请检查杜邦线 / 供电，重插拔探针后再试。" % exc))
+                else:
+                    self.done.emit(False, (
+                        "SWD 通信失败（%s）。请点『断开探针』后重新连接，"
+                        "再重试烧录。" % exc))
+                return
+            except Exception as exc:            # pragma: no cover
+                self.log_line.emit(traceback.format_exc())
+                self.done.emit(False, _friendly_pyocd_error(
+                    exc, self.target, self.pack_path))
+                return
+            finally:
+                if owned and session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
 
 
 def _friendly_pyocd_error(exc: Exception, target: str, pack_path: str) -> str:
@@ -327,9 +360,8 @@ def _friendly_pyocd_error(exc: Exception, target: str, pack_path: str) -> str:
     base = "%s: %s" % (type(exc).__name__, exc)
     if isinstance(exc, AssertionError) and pack_path:
         return (
-            "pyocd 无法构建型号 %s 的 flash 内存布局（CMSIS-Pack 兼容性缺陷，"
-            "已实测到 pyocd 0.46.1 仍未修复）。请手动选择与芯片实际容量一致的"
-            "型号（如大容量 GD32F502VE / CG）。" % (target or "未知"))
+            "pyocd 无法构建型号 %s 的 flash 内存布局（CMSIS-Pack 兼容性缺陷）。"
+            "请手动选择与芯片实际容量一致的型号。" % (target or "未知"))
     return base
 
 

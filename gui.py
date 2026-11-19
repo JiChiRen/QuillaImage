@@ -231,7 +231,6 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.addWidget(self._build_layout())
         layout.addWidget(self._build_tabs(), 1)
         layout.addWidget(self._build_log())
         self.setCentralWidget(root)
@@ -239,8 +238,8 @@ class MainWindow(QMainWindow):
         if not PYOCD_OK:
             self.log("[提示] 未检测到 pyocd（%s），打包页可正常使用，"
                      "烧录页需先 pip install pyocd" % PYOCD_ERR)
-        self.log("布局：QBOOT 固定 0x%08X（0x%X B）；META 起址 / APP 起址见上方（两页共用）。"
-                 % (core.FLASH_BASE, core.QBOOT_SIZE))
+        self.log("烧录页整片 bin 固定从 0x%08X 起（已打包好，无需布局信息）；"
+                 "布局参数仅打包页使用。" % core.FLASH_BASE)
         self._restore_state()
         self._hook_autosave()
 
@@ -328,7 +327,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 控件构造
     def _build_layout(self) -> QWidget:
-        box = QGroupBox("布局（两页共用）")
+        """布局参数只在打包时用；烧录页烧的是已打包好的整片 bin。"""
+        box = QGroupBox("镜像布局（仅打包用）")
         form = QFormLayout(box)
 
         self.cmb_chip = QComboBox()
@@ -416,8 +416,9 @@ class MainWindow(QMainWindow):
         v.addStretch(1)
         v.addWidget(QLabel(
             "说明：烧录页只烧上面选定的整片 bin（内含 QBOOT / META / APP），\n"
-            "不会重复生成 manifest；要改固件/manifest 请到 ② 打包页重新导出。\n"
-            "烧录前会按上方 META/APP 起址自动校验 bin。"
+            "不重新生成 manifest；整片固定从 0x08000000 起烧。\n"
+            "烧前校验用的 META / APP 起址沿用 ② 打包页的布局设置。\n"
+            "要改固件 / manifest，请到 ② 打包页重新导出。"
         ))
         self._refresh_probes()
         return page
@@ -425,6 +426,9 @@ class MainWindow(QMainWindow):
     def _build_export_tab(self) -> QWidget:
         page = QWidget()
         v = QVBoxLayout(page)
+
+        # ---- 布局（芯片几何 + META/APP 起址，仅打包用） ----
+        v.addWidget(self._build_layout())
 
         # ---- 固件镜像（仅打包用） ----
         box_in = QGroupBox("固件镜像（仅打包用）")
@@ -701,7 +705,9 @@ class MainWindow(QMainWindow):
             self.log("枚举探针失败：%s" % exc)
             probes = []
         if not probes:
-            self.cmb_probe.addItem("（未检测到探针，烧录时将自动取第一个）", "")
+            # 枚举失败不影响烧录：probe_id 为空时 FlashWorker 会用
+            # return_first=True 让 pyocd 自动取第一个探针。
+            self.cmb_probe.addItem("（列表为空；烧录时自动取第一个探针）", "")
             return
         for p in probes:
             self.cmb_probe.addItem(

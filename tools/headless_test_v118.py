@@ -67,6 +67,17 @@ class FlakyProgrammer:
         return _Prog()
 
 
+class RecordingConnectHelper:
+    """Returns a fresh FakeSession and records the kwargs of each call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def session_with_chosen_probe(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeSession()
+
+
 def run_worker(session=None):
     logs = []
     done = []
@@ -79,11 +90,13 @@ def run_worker(session=None):
     return logs, done, progress
 
 
+# keep the synchronous test fast - no real sleep between retries
+gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
+
 # ---- 1. transient fault: auto-retry with a fresh session succeeds ----
 FakeSession.opens = FakeSession.closes = 0
-gui._PY = {"ConnectHelper": type(
-                "CH", (), {"session_with_chosen_probe":
-                           staticmethod(lambda **k: FakeSession())}),
+helper = RecordingConnectHelper()
+gui._PY = {"ConnectHelper": helper,
            "FileProgrammer": FlakyProgrammer(fail_times=1),
            "TransferError": FakeTransferError}
 logs, done, progress = run_worker()
@@ -96,13 +109,20 @@ check("transient: retry logged",
       any("自动重试" in s for s in logs))
 check("transient: progress reset before retry",
       any(v == 0 for v in progress))
+check("transient: first attempt uses default clock",
+      "frequency" not in helper.calls[0])
+check("transient: retry lowers clock to 500 kHz",
+      helper.calls[1].get("frequency") == 500000,
+      str(helper.calls[1].get("frequency")))
 
-# ---- 2. persistent fault: gives up after one retry with guidance ----
+# ---- 2. persistent fault: gives up after three attempts with guidance ----
 FakeSession.opens = FakeSession.closes = 0
+helper = RecordingConnectHelper()
+gui._PY["ConnectHelper"] = helper
 gui._PY["FileProgrammer"] = FlakyProgrammer(fail_times=99)
 logs, done, progress = run_worker()
 check("persistent: reported failure", done and not done[-1][0], str(done))
-check("persistent: exactly two attempts", FakeSession.opens == 2,
+check("persistent: exactly three attempts", FakeSession.opens == 3,
       "opens=%d" % FakeSession.opens)
 check("persistent: guidance mentions re-plug",
       "重插拔" in done[-1][1], done[-1][1][:50])

@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import sys
 import threading
 import traceback
@@ -223,6 +224,11 @@ def _parse_addr(text: str, name: str) -> int:
 
 
 class FlashWorker(QThread):
+    # SWD 瞬态 FAULT 的递进重试参数：重试间隔与重试时的调试时钟。
+    # 500 kHz 对杜邦线/劣化链路明显更稳，仅重试时使用，正常烧录不减速。
+    FLASH_RETRY_DELAY_S = 1.5
+    FLASH_RETRY_CLOCK_HZ = 500000
+
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
 
     log_line = Signal(str)
@@ -265,12 +271,16 @@ class FlashWorker(QThread):
         owned = self.session is None
         # Ali 上板实测（2026-11-19）：整片擦除期间偶发 SWD ACK FAULT
         # （Unexpected ACK '5'），失败后手动重开一次会话即成功——瞬态
-        # 调试链路问题。瞬时模式自动用新会话重试 1 次；复用持有会话时
-        # 链路状态未知，不自动重试，交给操作员断开重连。
-        max_attempts = 2 if owned else 1
+        # 调试链路问题。递进重试：先原时钟新会话，再降时钟（pyocd 会话
+        # 选项 'frequency'，见 core/session.py:660），共 3 次；复用持有
+        # 会话时链路状态未知，不自动重试，交给操作员断开重连。
+        max_attempts = 3 if owned else 1
         attempt = 0
         while True:
             attempt += 1
+            if attempt > 1:
+                # 给探针/链路一点恢复时间（挂死的 WCH-Link 需要收尾）。
+                time.sleep(self.FLASH_RETRY_DELAY_S)
             session = None
             try:
                 if owned:
@@ -278,6 +288,12 @@ class FlashWorker(QThread):
                         "blocking": False,
                         "target_override": self.target or "py32f040xb",
                     }
+                    if attempt > 1:
+                        # 错误信息自带的建议就是 reduce debugger clock。
+                        kwargs["frequency"] = self.FLASH_RETRY_CLOCK_HZ
+                        self.log_line.emit(
+                            "第 %d 次尝试：降低调试时钟至 %d kHz"
+                            % (attempt, self.FLASH_RETRY_CLOCK_HZ // 1000))
                     if self.pack_path:
                         kwargs["pack"] = self.pack_path
                     if self.probe_id:
@@ -329,8 +345,9 @@ class FlashWorker(QThread):
                     continue                    # finally 负责关掉本次会话
                 if owned:
                     self.done.emit(False, (
-                        "SWD 通信失败（%s）。已自动重试 1 次仍未成功："
-                        "请检查杜邦线 / 供电，重插拔探针后再试。" % exc))
+                        "SWD 通信失败（%s）。已自动重试 2 次（含降低时钟）"
+                        "仍未成功：请检查杜邦线 / 供电，重插拔探针后再试。"
+                        % exc))
                 else:
                     self.done.emit(False, (
                         "SWD 通信失败（%s）。请点『断开探针』后重新连接，"

@@ -87,8 +87,8 @@ PyInstaller 的 `hook-PySide6.py` 通过
 | 运行时快照显示"未加载" | 32.9 MiB / 42 文件 | — |
 
 剩余 32.9 MiB 中，绝大多数属于"条件加载 / 插件 / 数据"，**不建议再删**。
-真正能安全拿掉的只有少量明确无用的（如 `_multiprocessing.pyd`、
-`wcwidth/textwrap.py,cover`、多余的 license 副本），收益 < 1 MiB，不值得
+少数明确无 importer 的 Python C 扩展已按下一节方法处理；其余候选
+（如 `wcwidth/textwrap.py,cover`、license 副本）收益 < 1 KiB，不值得
 增加回归风险。
 
 
@@ -125,21 +125,6 @@ PY
   无 importer，合计约 0.5 MiB。
 - 留：`hid.cp314-win_amd64.pyd` —— `pyocd` 的 HID 探针后端和
   `pyserial` 的 CP2110 handler 会条件加载它；快照没抓到但绝不能删。
-
-## 关于"110M 精简到 15M"类文章（CSDN 实战帖）
-
-参考了两篇 CSDN 文章（110M→15M / 110M→46M），方法是同一套：删
-Qt 多余模块/插件/翻译 + 功能回归，并强调"重命名为 .bak 而非直接删"
-和"每删一组就完整测试"。这跟本项目的 `prune_qt()` + `smoke.py` 一致。
-
-关键差异在**压缩**：文章里的 46M 是 Inno Setup 打包后的安装包体积，
-15M 是进一步 solid/LZMA2 压缩（且砍掉更多组件）的结果；我们的 96 MiB
-是**未压缩目录**。实测对本目录做 ZIP deflate-9 已得到 **46.4 MiB**，
-与那篇文章的 46M 档吻合。也就是说：
-
-- 若目标是"分发包小"，上 Inno Setup / 7z solid 压缩即可拿到 ~46 MiB；
-- 若目标是"解压后占用小"，只能继续砍组件，但本项目已到收益拐点；
-- 文章未公开完整的 15M 文件清单（付费墙），其数字不可复现，不作为目标。
 
 ## 一句话结论
 

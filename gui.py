@@ -321,14 +321,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 状态持久化
     _STATE_KEYS = (
-        "flash_image", "pack", "target", "boot", "app", "key",
+        "flash_image", "target", "boot", "app", "key",
         "export_out", "meta_out", "meta_base", "app_start", "chip_pack",
     )
 
     def _state_dict(self) -> dict:
         state = {
             "flash_image": self.ed_flash_image.text().strip(),
-            "pack": self.ed_pack.text().strip(),
+            "pack": self.ed_chip_pack.text().strip(),
             "target": self.ed_target.text().strip(),
             "boot": self.ed_boot.text().strip(),
             "app": self.ed_app.text().strip(),
@@ -436,14 +436,19 @@ class MainWindow(QMainWindow):
         self.cmb_mcu.currentIndexChanged.connect(self._on_mcu_changed)
         self.lbl_chip_geo = QLabel("未选择芯片；可从 Pack 导入，或用预设芯片。")
 
+        # pyocd target override: MCU 型号来自 Pack，但 pyocd 未必内建同款
+        # target（如 GD32E23x 全系列无内建），此时必须能手输。
+        self.ed_target = QLineEdit("py32f040xb")
+
         form.addRow("CMSIS Pack:", prow)
         form.addRow("MCU 型号:", self.cmb_mcu)
         form.addRow("", self.lbl_chip_geo)
+        form.addRow("pyocd 目标:", self.ed_target)
         return box
 
     def _pick_chip_pack(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 CMSIS Pack (*.pack)", self.cfg.get("chip_pack_dir", ""),
+            self, "选择 CMSIS Pack (*.pack)", self._start_dir(self.ed_chip_pack),
             "CMSIS Pack (*.pack);;All files (*.*)")
         if not path:
             return
@@ -459,7 +464,6 @@ class MainWindow(QMainWindow):
                                 "这个 Pack 里没有带 Flash/RAM 容量定义的芯片。")
             return
         self.ed_chip_pack.setText(path)
-        self.cfg["chip_pack_dir"] = os.path.dirname(path)
         self.pack_devices = devices
         self.cmb_mcu.blockSignals(True)
         self.cmb_mcu.clear()
@@ -548,14 +552,6 @@ class MainWindow(QMainWindow):
         r.addWidget(self.cmb_probe, 1); r.addWidget(btn_refresh)
         r.addWidget(self.btn_identity)
 
-        self.ed_target = QLineEdit("py32f040xb")
-        self.ed_pack = QLineEdit()
-        btn_pack = QPushButton("浏览...")
-        btn_pack.clicked.connect(lambda: self._pick_into(
-            self.ed_pack, "选择 CMSIS Pack (*.pack)，可留空", "*.pack"))
-        prow = QWidget(); pr = QHBoxLayout(prow); pr.setContentsMargins(0, 0, 0, 0)
-        pr.addWidget(self.ed_pack, 1); pr.addWidget(btn_pack)
-
         self.cb_erase = QCheckBox("烧录前整片擦除（出厂首片建议勾选）")
         self.cb_erase.setChecked(True)
 
@@ -569,8 +565,6 @@ class MainWindow(QMainWindow):
 
         form.addRow("整片 bin 文件:", irow)
         form.addRow("调试探针:", row)
-        form.addRow("目标芯片:", self.ed_target)
-        form.addRow("CMSIS Pack:", prow)
         v.addLayout(form)
         v.addWidget(self.cb_erase)
         v.addWidget(self.progress)
@@ -583,6 +577,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel(
             "说明：烧录页只烧上面选定的整片 bin（内含 QBOOT / META / APP），\n"
             "不重新生成 manifest；整片固定从 0x08000000 起烧。\n"
+            "调试探针、CMSIS Pack 与 pyocd 目标在窗口顶部公共区设置；\n"
             "烧前校验用的 META / APP 起址沿用 ② 打包页的布局设置。\n"
             "要改固件 / manifest，请到 ② 打包页重新导出。"
         ))
@@ -897,7 +892,7 @@ class MainWindow(QMainWindow):
         self.log("读取 MCU 型号 ...")
         self.identity_worker = IdentityWorker(
             probe_id, self.ed_target.text().strip(),
-            self.ed_pack.text().strip())
+            self.ed_chip_pack.text().strip())
         self.identity_worker.done.connect(self._identity_done)
         self.identity_worker.start()
 
@@ -959,7 +954,7 @@ class MainWindow(QMainWindow):
             image_path,
             self.cmb_probe.currentData() or "",
             self.ed_target.text().strip(),
-            self.ed_pack.text().strip(),
+            self.ed_chip_pack.text().strip(),
             self.cb_erase.isChecked(),
         )
         self.worker.log_line.connect(self.log)

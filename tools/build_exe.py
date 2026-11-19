@@ -79,6 +79,16 @@ PRUNE_FILES = (
     "PySide6/plugins/imageformats/qwbmp.dll",
     "PySide6/plugins/imageformats/qwebp.dll",
 )
+#: Optional C accelerators PyInstaller collects but nothing imports.
+#: Analysis-00.toc confirms the pure-Python fallbacks (decimal,
+#: multiprocessing) are in the graph while the C variants have no importer;
+#: cffi has no importer at all. hid.pyd is NOT here: pyocd's HID probe
+#: backend imports it conditionally (only when a HID CMSIS-DAP is attached).
+PRUNE_FILES += (
+    "_decimal.pyd",
+    "_multiprocessing.pyd",
+    "_cffi_backend.cp314-win_amd64.pyd",
+)
 PRUNE_DIRS = ("PySide6/translations",)
 
 

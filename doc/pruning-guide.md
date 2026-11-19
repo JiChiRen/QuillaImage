@@ -91,6 +91,56 @@ PyInstaller 的 `hook-PySide6.py` 通过
 `wcwidth/textwrap.py,cover`、多余的 license 副本），收益 < 1 MiB，不值得
 增加回归风险。
 
+
+## pyd 文件的判定（Python C 扩展，比 DLL 好判）
+
+`.pyd` 是 Windows 上的 Python 扩展模块，由 `import` 触发加载。除了运行时
+快照，还能用**静态依赖图**精确判定——这是 DLL 做不到的：
+
+```bash
+# PyInstaller 把依赖图写在 Analysis-00.toc（构建后保留）
+python - <<'PY'
+import ast
+d = ast.literal_eval(open("build/freeze/build/quilla-image/Analysis-00.toc",
+                          encoding="utf-8").read())
+entries = d[14] + d[19]     # 二进制模块 + 纯 Python 模块
+for name in ("decimal", "_decimal", "cffi", "hid"):
+    hits = [e[0] for e in entries if e and e[0] == name]
+    print(name, hits or "NOT in graph")
+PY
+```
+
+判定规则：
+
+| 情况 | 结论 |
+|---|---|
+| 模块在图中、C 加速 pyd 不在 | 可删，自动回退纯 Python（稍慢，功能不变） |
+| 模块和 pyd 都不在图中 | 可删（无 importer） |
+| 有模块在图中引用该 pyd | **必须保留**，即使运行时快照显示未加载 |
+
+本项目实测（25 个 pyd / 15.0 MiB，22 个已加载）：
+
+- 删：`_decimal.pyd` (285 KiB)、`_multiprocessing.pyd` (38 KiB)、
+  `_cffi_backend.cp314-win_amd64.pyd` (177 KiB) —— 纯 Python 回退 /
+  无 importer，合计约 0.5 MiB。
+- 留：`hid.cp314-win_amd64.pyd` —— `pyocd` 的 HID 探针后端和
+  `pyserial` 的 CP2110 handler 会条件加载它；快照没抓到但绝不能删。
+
+## 关于"110M 精简到 15M"类文章（CSDN 实战帖）
+
+参考了两篇 CSDN 文章（110M→15M / 110M→46M），方法是同一套：删
+Qt 多余模块/插件/翻译 + 功能回归，并强调"重命名为 .bak 而非直接删"
+和"每删一组就完整测试"。这跟本项目的 `prune_qt()` + `smoke.py` 一致。
+
+关键差异在**压缩**：文章里的 46M 是 Inno Setup 打包后的安装包体积，
+15M 是进一步 solid/LZMA2 压缩（且砍掉更多组件）的结果；我们的 96 MiB
+是**未压缩目录**。实测对本目录做 ZIP deflate-9 已得到 **46.4 MiB**，
+与那篇文章的 46M 档吻合。也就是说：
+
+- 若目标是"分发包小"，上 Inno Setup / 7z solid 压缩即可拿到 ~46 MiB；
+- 若目标是"解压后占用小"，只能继续砍组件，但本项目已到收益拐点；
+- 文章未公开完整的 15M 文件清单（付费墙），其数字不可复现，不作为目标。
+
 ## 一句话结论
 
 **方法 1 找候选，方法 2 查依赖，方法 4 验证；方法 3 决定是否值得改构建。**

@@ -57,10 +57,12 @@ pip install -e .[gui]        # PySide6 + pyocd
 python gui.py                # 或 python gui.py --check 检查依赖
 ```
 
-独立 exe：从 Releases 下载 `quilla-image.exe`，无需安装 Python。设置保存在
-**exe 同目录**的 `state.json`（源码运行时在仓库根目录），工具连同配置可整体
-拷贝、带到别的机器；删除该文件即恢复默认。图标从内部资源目录读取，不在 exe
-旁边放只读资源。
+独立应用：从 Releases 下载整个 `quilla-image/` 目录，运行其中的
+`quilla-image.exe`，无需安装 Python。这是 PyInstaller **onedir** 构建——请把
+整个目录一起拷贝，exe 会从旁边的 `_internal/` 加载 Qt / pyocd DLL。onedir
+免去了单文件版每次启动的解压过程，启动更快。设置保存在 **exe 同目录**的
+`state.json`（源码运行时在仓库根目录），工具连同配置可整体拷贝、带到别的
+机器；删除该文件即恢复默认。目录内的 `SHA256SUMS.txt` 覆盖所有分发文件。
 
 ## 边界
 
@@ -79,6 +81,6 @@ QuillaImage 自身采用 Apache-2.0（见 [LICENSE](LICENSE)）。内置 Ed25519
 
 随 exe 分发的 **Qt 6 / PySide6 6.11.2** 动态库按 LGPLv3 授权，均为官方
 原始二进制，**未做任何修改、未重新链接**。二进制分发包含 `LICENSES-Qt.txt`
-以及 `dist/licenses/` 下完整的 `LGPL-3.0.txt` / `GPL-3.0.txt` 文本；
+以及 `dist/quilla-image/licenses/` 下完整的 `LGPL-3.0.txt` / `GPL-3.0.txt` 文本；
 对应 Qt 源码获取地址见 `LICENSES-Qt.txt`。该文件同时列出各 DLL 哈希与
 LGPLv3 §4(d)(1) 允许的库替换途径。

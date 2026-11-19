@@ -68,12 +68,15 @@ pip install -e .[gui]        # PySide6 + pyocd
 python gui.py                # or: python gui.py --check  (dependency check)
 ```
 
-Standalone executable: download `quilla-image.exe` from Releases, no Python
-installation required. Settings are stored in `state.json` **next to the
-executable** (or at the repository root when run from source), so a portable
-copy of the tool carries its paths and options with it. Delete that file to
-reset. Bundled icons are read from the internal resource directory; the
-executable's own directory is never used for read-only assets.
+Standalone application: download the `quilla-image/` directory from
+Releases and run `quilla-image.exe` inside it, no Python installation
+required. This is a PyInstaller **onedir** build — keep the whole directory
+together; the exe loads Qt / pyocd DLLs from `_internal/` beside it. Onedir
+skips the per-launch extraction of a one-file archive, so startup is fast.
+Settings are stored in `state.json` **next to the executable** (or at the
+repository root when run from source), so a portable copy carries its paths
+and options with it. Delete that file to reset. `SHA256SUMS.txt` in the
+folder covers every shipped file.
 
 ## Boundaries
 
@@ -96,6 +99,6 @@ Ed25519 signer is identical to the one in [Quilla](https://github.com/JiChiRen/Q
 The bundled executable ships unmodified **Qt 6 / PySide6 6.11.2** dynamic
 libraries under LGPLv3. No Qt library is patched or relinked. The binary
 distribution includes `LICENSES-Qt.txt` and the full `LGPL-3.0.txt` /
-`GPL-3.0.txt` texts in `dist/licenses/`; corresponding Qt source is linked
+`GPL-3.0.txt` texts in `dist/quilla-image/licenses/`; corresponding Qt source is linked
 in `LICENSES-Qt.txt`. See that file for the bundled DLL hashes and the
 library-replacement route permitted by LGPLv3 §4(d)(1).

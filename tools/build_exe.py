@@ -15,14 +15,17 @@
 #
 # This file is part of QuillaImage.
 
-"""Freeze QuillaImage into a standalone Windows executable.
+"""Freeze QuillaImage into a Windows application directory (onedir).
 
 Usage::
 
     python tools/build_exe.py
 
-Produces ``dist/quilla-image.exe`` (GUI, windowed). The core image packer
-remains usable from source with no third-party dependencies::
+Produces ``dist/quilla-image/quilla-image.exe`` plus its Qt / pyocd runtime
+files in the same folder. Onedir avoids the per-launch extraction of a
+one-file archive, so startup is much faster at the cost of a folder instead
+of a single file. The core image packer remains usable from source with no
+third-party dependencies::
 
     python -m package.image selftest
     python -m package.image --help
@@ -63,11 +66,12 @@ def main(argv=None) -> int:
         fh.write(ENTRY_SOURCE)
 
     exe = "quilla-image" + (".exe" if os.name == "nt" else "")
+    app_dir = os.path.join(DIST, "quilla-image")
     args = [
         sys.executable, "-m", "PyInstaller",
         entry,
         "--name", "quilla-image",
-        "--onefile",
+        "--onedir",
         "--noconfirm",
         "--clean",
         "--distpath", DIST,
@@ -103,30 +107,39 @@ def main(argv=None) -> int:
         sep = ";" if os.name == "nt" else ":"
         args += ["--add-data", "%s%sassets" % (svg, sep)]
 
-    print("[build] %s -> %s" % ("quilla-image", os.path.join(DIST, exe)))
-    if os.path.isdir(WORK) and "--no-clean" not in (argv or []):
+    print("[build] %s -> %s" % ("quilla-image", os.path.join(app_dir, exe)))
+    # Remove stale one-file artifacts and the previous onedir tree so the
+    # output directory contains exactly one build.
+    stale = os.path.join(DIST, exe)
+    if os.path.isfile(stale):
+        os.remove(stale)
+    if "--no-clean" not in (argv or []):
+        shutil.rmtree(app_dir, ignore_errors=True)
         shutil.rmtree(os.path.join(WORK, "build"), ignore_errors=True)
     proc = subprocess.run(args, cwd=ROOT)
     if proc.returncode != 0:
         raise SystemExit("[build] PyInstaller failed (rc=%d)" % proc.returncode)
-    out = os.path.join(DIST, exe)
+    out = os.path.join(app_dir, exe)
     if not os.path.isfile(out):
         raise SystemExit("[build] expected output missing: %s" % out)
-    print("[build] %-20s %8.1f KiB" % (exe, os.path.getsize(out) / 1024.0))
 
     # LGPLv3 compliance: the Qt dynamic libraries are bundled unmodified;
     # ship their license texts and the Qt notice next to the executable.
-    import shutil as _shutil
-    licenses = os.path.join(DIST, "licenses")
+    licenses = os.path.join(app_dir, "licenses")
     os.makedirs(licenses, exist_ok=True)
     for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
         src = os.path.join(ROOT, "licenses", name)
         if os.path.isfile(src):
-            _shutil.copyfile(src, os.path.join(licenses, name))
+            shutil.copyfile(src, os.path.join(licenses, name))
     notice = os.path.join(ROOT, "LICENSES-Qt.txt")
     if os.path.isfile(notice):
-        _shutil.copyfile(notice, os.path.join(DIST, "LICENSES-Qt.txt"))
-    print("[build] Qt LGPL/GPL license texts copied to dist/licenses/")
+        shutil.copyfile(notice, os.path.join(app_dir, "LICENSES-Qt.txt"))
+
+    total = sum(os.path.getsize(os.path.join(dp, f))
+                for dp, _, fs in os.walk(app_dir) for f in fs)
+    print("[build] %-20s exe %8.1f KiB / folder %8.1f KiB"
+          % (exe, os.path.getsize(out) / 1024.0, total / 1024.0))
+    print("[build] Qt LGPL/GPL license texts copied to dist/quilla-image/licenses/")
     return 0
 
 

@@ -52,6 +52,55 @@ ENTRY_SOURCE = (
 )
 
 
+#: PySide6's PyInstaller hook collects the entire Qt bin/plugins tree. The
+#: GUI only uses QtCore / QtGui / QtWidgets / QtSvg and the windows platform
+#: plugin. These files are never loaded and are removed after collection:
+#: QML / Quick / PDF, OpenGL (incl. the 20 MiB software rasterizer), virtual
+#: keyboard, translations, and image-format plugins we do not open.
+PRUNE_FILES = (
+    "PySide6/Qt6Qml.dll", "PySide6/Qt6QmlMeta.dll",
+    "PySide6/Qt6QmlModels.dll", "PySide6/Qt6QmlWorkerScript.dll",
+    "PySide6/Qt6Quick.dll", "PySide6/Qt6Pdf.dll",
+    "PySide6/Qt6OpenGL.dll", "PySide6/Qt6VirtualKeyboard.dll",
+    "PySide6/opengl32sw.dll",
+    "PySide6/QtNetwork.pyd", "PySide6/Qt6Network.dll",
+    "PySide6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
+    "PySide6/plugins/iconengines/qsvgicon.dll",
+    "PySide6/plugins/generic/qtuiotouchplugin.dll",
+    "PySide6/plugins/networkinformation/qnetworklistmanager.dll",
+    "PySide6/plugins/tls/qcertonlybackend.dll",
+    "PySide6/plugins/tls/qopensslbackend.dll",
+    "PySide6/plugins/imageformats/qgif.dll",
+    "PySide6/plugins/imageformats/qicns.dll",
+    "PySide6/plugins/imageformats/qjpeg.dll",
+    "PySide6/plugins/imageformats/qpdf.dll",
+    "PySide6/plugins/imageformats/qtga.dll",
+    "PySide6/plugins/imageformats/qtiff.dll",
+    "PySide6/plugins/imageformats/qwbmp.dll",
+    "PySide6/plugins/imageformats/qwebp.dll",
+)
+PRUNE_DIRS = ("PySide6/translations",)
+
+
+def prune_qt(app_dir: str) -> None:
+    """Drop Qt components the GUI never loads (PyInstaller over-collects)."""
+    internal = os.path.join(app_dir, "_internal")
+    removed = 0
+    for rel in PRUNE_FILES:
+        path = os.path.join(internal, *rel.split("/"))
+        if os.path.isfile(path):
+            removed += os.path.getsize(path)
+            os.remove(path)
+    for rel in PRUNE_DIRS:
+        path = os.path.join(internal, *rel.split("/"))
+        if os.path.isdir(path):
+            for dp, _, fs in os.walk(path):
+                for f in fs:
+                    removed += os.path.getsize(os.path.join(dp, f))
+            shutil.rmtree(path, ignore_errors=True)
+    print("[build] pruned unused Qt files: %.1f MiB" % (removed / 1048576.0))
+
+
 def main(argv=None) -> int:
     try:
         import PyInstaller  # noqa: F401
@@ -72,14 +121,20 @@ def main(argv=None) -> int:
         entry,
         "--name", "quilla-image",
         "--onedir",
+        # GUI app: use the Windows GUI subsystem, otherwise a console window
+        # flashes up before Qt shows the main window.
+        "--windowed",
         "--noconfirm",
         "--clean",
         "--distpath", DIST,
         "--workpath", os.path.join(WORK, "build"),
         "--specpath", WORK,
         "--paths", ROOT,
-        # Qt platform plugin and SVG image support are loaded at run time.
-        "--collect-submodules", "PySide6.QtPlugins",
+        # PySide6's hook pulls in the Qt libraries actually imported by the
+        # code (QtCore / QtGui / QtWidgets / QtSvg) plus the required plugins.
+        # Do NOT --collect-submodules PySide6.QtPlugins here: it drags in the
+        # whole Qt (Qml / Quick / Pdf / OpenGL / software rasterizer), which
+        # more than doubles the distribution for no functional gain.
         "--hidden-import", "PySide6.QtSvg",
         "--hidden-import", "PySide6.QtGui",
         "--hidden-import", "PySide6.QtWidgets",
@@ -134,6 +189,8 @@ def main(argv=None) -> int:
     notice = os.path.join(ROOT, "LICENSES-Qt.txt")
     if os.path.isfile(notice):
         shutil.copyfile(notice, os.path.join(app_dir, "LICENSES-Qt.txt"))
+
+    prune_qt(app_dir)
 
     total = sum(os.path.getsize(os.path.join(dp, f))
                 for dp, _, fs in os.walk(app_dir) for f in fs)

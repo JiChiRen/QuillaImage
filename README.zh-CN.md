@@ -73,6 +73,15 @@ python gui.py                # 或 python gui.py --check 检查依赖
 - pyocd 烧录面向小批量 / 工程用途；量产线建议用自己的烧录器，配合本工具
   的「仅校验」功能。
 
+### 分发体积
+
+PyInstaller 的 Qt hook 会把整套 Qt 运行时（约 92 MiB）都收进来。构建脚本
+会删除这个 GUI 根本不加载的组件——QML/Quick/PDF、OpenGL（含 20 MiB 的
+软件光栅化器）、虚拟键盘、翻译和用不到的图片格式插件——约省 50 MiB。
+最终目录约 96 MiB，只保留 QtCore / QtGui / QtWidgets / QtSvg 与 Windows
+平台插件。以后若加入 QML 或新图片格式，需同步改
+`tools/build_exe.py` 的 `PRUNE_FILES`。
+
 ## 许可证
 
 QuillaImage 自身采用 Apache-2.0（见 [LICENSE](LICENSE)）。内置 Ed25519

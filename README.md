@@ -90,6 +90,16 @@ folder covers every shipped file.
   production lines should use their own programmer and the Flash tab's
   "verify only" check.
 
+### Distribution size
+
+The PyInstaller hook collects the entire Qt runtime (~92 MiB). The build
+script removes components this GUI never loads — QML/Quick/PDF, OpenGL
+(including the 20 MiB software rasterizer), virtual keyboard, translations
+and unused image-format plugins — cutting about 50 MiB. The result is a
+~96 MiB folder using only QtCore / QtGui / QtWidgets / QtSvg and the Windows
+platform plugin. If you add QML or image formats later, adjust `PRUNE_FILES`
+in `tools/build_exe.py`.
+
 ## License
 
 QuillaImage itself is Apache-2.0 (see [LICENSE](LICENSE)). The vendored

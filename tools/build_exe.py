@@ -88,6 +88,12 @@ PRUNE_FILES += (
     "_decimal.pyd",
     "_multiprocessing.pyd",
     "_cffi_backend.cp314-win_amd64.pyd",
+    # pyocd's CMSIS-SVD peripheral register descriptions (14.5 MiB, already
+    # a zip so LZMA2 can barely shrink it). Used only by debug/SVD views;
+    # pyocd itself states SVD is not required for load/erase/reset commands
+    # (pyocd/target/pack/cbuild_run.py: "SVD file is not required for
+    # load/erase/reset commands"). This tool only does SWD flash programming.
+    "pyocd/debug/svd/svd_data.zip",
 )
 PRUNE_DIRS = ("PySide6/translations",)
 

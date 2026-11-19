@@ -85,6 +85,14 @@ PyInstaller 的 `hook-PySide6.py` 通过
 | hook 全收 | 147 MiB | 203 |
 | 类别 1 裁剪后 | 96 MiB | 82 |
 | 运行时快照显示"未加载" | 32.9 MiB / 42 文件 | — |
+| 裁剪可选 pyd + pyocd SVD 数据后 | 81 MiB | 78 |
+
+其中 `pyocd/debug/svd/svd_data.zip`（14.5 MiB）是 CMSIS-SVD 外设寄存器
+描述，只用于调试视图；pyocd 自身注明 load/erase/reset 不需要它
+（`pyocd/target/pack/cbuild_run.py`）。本工具只做 SWD flash 编程，已移除。
+
+分发包用 7-Zip LZMA2 极限压缩（`-mx=9 -md=64m -ms=on`）：
+`QuillaImageReleaseV1.0.5.7z` = 23.7 MiB，7z 自检通过。
 
 剩余 32.9 MiB 中，绝大多数属于"条件加载 / 插件 / 数据"，**不建议再删**。
 少数明确无 importer 的 Python C 扩展已按下一节方法处理；其余候选

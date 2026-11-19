@@ -59,17 +59,51 @@ TARGETS = {
 }
 
 
-def resolve_target(name: str | None) -> dict:
-    """按芯片名返回几何参数；None/空串退回 PY32 默认（兼容旧调用）。"""
+def resolve_target(name: str | None, geometry: dict | None = None) -> dict:
+    """返回目标几何参数。
+
+    ``name`` 命中 TARGETS 时用预设；否则需传 ``geometry``（来自 CMSIS
+    pack 的 flash_size / ram_size / name / 可选 ram_start）。两者都不给
+    则退回 PY32 默认，兼容既有调用。这样打包页不再受限于两张硬编码预设。
+    """
     key = (name or "py32f040xb").strip().lower()
-    if key not in TARGETS:
+    if geometry is None and key in TARGETS:
+        flash_size, ram_size, meta_base, app_start, label = TARGETS[key]
+        return {
+            "name": key, "flash_base": FLASH_BASE, "flash_size": flash_size,
+            "ram_start": RAM_START, "ram_size": ram_size,
+            "meta_base": meta_base, "app_start": app_start, "label": label,
+        }
+    if geometry is None:
+        if not name:
+            flash_size, ram_size, meta_base, app_start, label = TARGETS["py32f040xb"]
+            return {
+                "name": "py32f040xb", "flash_base": FLASH_BASE,
+                "flash_size": flash_size, "ram_start": RAM_START,
+                "ram_size": ram_size, "meta_base": meta_base,
+                "app_start": app_start, "label": label,
+            }
         raise ImageError("未知目标芯片 %r；可选：%s"
                          % (name, ", ".join(sorted(TARGETS))))
-    flash_size, ram_size, meta_base, app_start, label = TARGETS[key]
+
+    # 动态几何（CMSIS pack 导入）
+    try:
+        flash_size = int(geometry["flash_size"])
+        ram_size = int(geometry["ram_size"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ImageError("几何参数缺少合法的 flash_size / ram_size：%s" % exc)
+    if flash_size < QBOOT_SIZE + META_SIZE + 0x1000:
+        raise ImageError("Flash 容量 0x%X 太小，放不下 QBOOT + META + APP"
+                         % flash_size)
+    ram_start = int(geometry.get("ram_start", RAM_START))
+    label = geometry.get("label") or (name or "custom")
+    # 布局沿用默认偏移；调用方可在 resolve_layout 时覆盖
     return {
         "name": key, "flash_base": FLASH_BASE, "flash_size": flash_size,
-        "ram_start": RAM_START, "ram_size": ram_size,
-        "meta_base": meta_base, "app_start": app_start, "label": label,
+        "ram_start": ram_start, "ram_size": ram_size,
+        "meta_base": FLASH_BASE + META_OFFSET,
+        "app_start": FLASH_BASE + APP_OFFSET,
+        "label": label,
     }
 
 
@@ -156,9 +190,10 @@ def detect_variant(boot: bytes) -> str:
     return "unknown"
 
 
-def validate_boot(boot: bytes, target: str | None = None) -> tuple[int, int]:
+def validate_boot(boot: bytes, target: str | None = None,
+                  geometry: dict | None = None) -> tuple[int, int]:
     """校验 QBOOT 镜像大小与向量表，返回 (初始MSP, 复位向量)。"""
-    t = resolve_target(target)
+    t = resolve_target(target, geometry)
     if not boot:
         raise ImageError("QBOOT 镜像为空")
     if len(boot) > QBOOT_SIZE:
@@ -185,14 +220,15 @@ def validate_boot(boot: bytes, target: str | None = None) -> tuple[int, int]:
 
 def resolve_layout(meta_base: int | None = None,
                    app_start: int | None = None,
-                   target: str | None = None) -> dict:
+                   target: str | None = None,
+                   geometry: dict | None = None) -> dict:
     """解析并校验 META/APP 起址布局，返回偏移与 APP 容量。
 
     约束：QBOOT 固定占 [FLASH_BASE, FLASH_BASE+QBOOT_SIZE)；
     META 区大小固定 META_SIZE；META 与 APP 起址 4 字节对齐；
     APP 区从 app_start 一直延伸到 FLASH 末尾（容量自动推导）。
     """
-    t = resolve_target(target)
+    t = resolve_target(target, geometry)
     meta_base = meta_base if meta_base is not None else t["meta_base"]
     app_start = app_start if app_start is not None else t["app_start"]
     flash_size = t["flash_size"]
@@ -223,7 +259,8 @@ def resolve_layout(meta_base: int | None = None,
 
 def validate_app(app: bytes, app_start: int | None = None,
                  app_size: int | None = None,
-                 target: str | None = None) -> tuple[int, int]:
+                 target: str | None = None,
+                 geometry: dict | None = None) -> tuple[int, int]:
     """校验 APP 镜像大小与向量表，返回 (初始MSP, 复位向量)。
 
     重点：SP 必须严格小于 RAM 末址。quilla 的
@@ -231,7 +268,7 @@ def validate_app(app: bytes, app_start: int | None = None,
     判为非法镜像并拒跳 APP；GCC 链接脚本若把 _estack 定义成
     ORIGIN(RAM)+LENGTH(RAM)（0x20004000）会正好踩中这条。
     """
-    t = resolve_target(target)
+    t = resolve_target(target, geometry)
     if app_start is None:
         app_start = t["app_start"]
     if app_size is None:
@@ -430,7 +467,8 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
                   preset_seal: bool = True,
                   meta_base: int | None = None,
                   app_start: int | None = None,
-                  target: str | None = None) -> tuple[bytes, bytes, dict]:
+                  target: str | None = None,
+                  geometry: dict | None = None) -> tuple[bytes, bytes, dict]:
     """返回 (整片 128 KiB 镜像, 256 B META 记录, manifest 信息字典)。
 
     meta_base / app_start 可覆盖默认布局（None 用出厂默认
@@ -451,9 +489,9 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
       * SEC    —— 同 SEALED 的签名与版本要求，但不写 seal（设备端
                   SECURE 模式每次启动全量验签，不用 seal）。
     """
-    layout = resolve_layout(meta_base, app_start, target)
-    validate_boot(boot, target)
-    validate_app(app, layout["app_start"], layout["app_size"], target)
+    layout = resolve_layout(meta_base, app_start, target, geometry)
+    validate_boot(boot, target, geometry)
+    validate_app(app, layout["app_start"], layout["app_size"], target, geometry)
 
     variant = detect_variant(boot)
     image_len = len(app)
@@ -519,21 +557,22 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
 
 def verify_combined(image: bytes, meta_base: int | None = None,
                     app_start: int | None = None,
-                    target: str | None = None) -> dict:
+                    target: str | None = None,
+                    geometry: dict | None = None) -> dict:
     """按 QBOOT 的视角复核整片镜像（布局与打包时一致才放行）。"""
-    t = resolve_target(target)
+    t = resolve_target(target, geometry)
     if len(image) != t["flash_size"]:
         raise ImageError(
             "整片镜像长度应为 %d B（目标 %s，0x08000000 起），实际 %d B"
             % (t["flash_size"], t["label"], len(image))
         )
 
-    layout = resolve_layout(meta_base, app_start, target)
+    layout = resolve_layout(meta_base, app_start, target, geometry)
     boot_area = image[:QBOOT_SIZE]
-    boot_sp, boot_reset = validate_boot(boot_area, target)
+    boot_sp, boot_reset = validate_boot(boot_area, target, geometry)
     app_sp, app_reset = validate_app(
         image[layout["app_offset"]:layout["app_offset"] + layout["app_size"]],
-        layout["app_start"], layout["app_size"], target)
+        layout["app_start"], layout["app_size"], target, geometry)
 
     rec = image[layout["meta_offset"]:layout["meta_offset"] + RECORD_SIZE]
     info = parse_meta_record(rec, image=image,
@@ -718,8 +757,29 @@ def selftest() -> None:
     else:
         raise AssertionError("GD32 镜像按 PY32 几何校验未被拒绝")
 
+    # 10) 动态几何（CMSIS pack 导入）：不在 TARGETS 里的芯片也能打包。
+    geo = {"flash_size": 0x40000, "ram_size": 0x8000,
+           "ram_start": 0x20000000, "label": "PACK-MCU (256K/32K)"}
+    pb = bytearray(boot)
+    struct.pack_into("<I", pb, 0, 0x20007000)   # 32 KiB RAM 内合法 MSP
+    pb[32:39] = b"[CHECK]"
+    pa = bytearray(app)
+    struct.pack_into("<I", pa, 0, 0x20007100)
+    pimg, _, _ = make_combined(bytes(pb), bytes(pa), version=3,
+                               target="pack-mcu", geometry=geo)
+    assert len(pimg) == 0x40000, "动态几何整片应为 256 KiB"
+    assert verify_combined(pimg, target="pack-mcu",
+                           geometry=geo)["variant"] == "CHECK"
+    # 未注册的芯片名没有几何时必须报错
+    try:
+        resolve_target(" totally-unknown ")
+    except ImageError:
+        pass
+    else:
+        raise AssertionError("未知芯片名无几何时未被拒绝")
+
     print("selftest: OK (CRC32 / 记录格式 / 合成布局 / 篡改检测 / 向量表边界 / "
-          "变体检测 / Ed25519 出厂签名 / 自定义布局 / 多芯片几何)")
+          "变体检测 / Ed25519 出厂签名 / 自定义布局 / 多芯片几何 / 动态几何)")
 
 
 # ---------------------------------------------------------------- CLI

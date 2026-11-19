@@ -17,21 +17,24 @@ protocol, or the on-target secure-boot policy.
 | **Flash** | Pick an existing full-chip `combined.bin` → verify it (vector tables, META CRC, image SHA-256) → flash once at `0x08000000` via pyocd. Does **not** regenerate the manifest. |
 | **Pack** | Pick QBOOT + APP (+ private key for SEALED/SEC) → generate the manifest → produce one full-chip image for the Flash tab. Can also export only the 256-byte META record, or verify an existing image. |
 
-Both tabs share the META base / APP start layout fields. Defaults match the
-PY32F040xB reference layout (see below); change them only when the QBOOT build
-and the APP linker base agree with the new values.
+### Shared chip selector (CMSIS-Pack)
 
-### Supported targets
+The **Chip / CMSIS-Pack** box at the top is shared by both tabs:
 
-| Target | Flash | RAM | Full image |
-|---|---|---|---|
-| `py32f040xb` (default) | 128 KiB | 16 KiB | 128 KiB |
-| `gd32f502ve` | 512 KiB | 64 KiB | 512 KiB |
+- Import a vendor `.pack`; the MCU list is parsed from its device definitions.
+- Select a model. Its Flash/RAM sizes (from the pack's memory map) drive the
+  packer's vector-table checks, and a candidate pyocd target name is filled
+  for flashing when pyocd has a built-in match.
+- **Read from target** (flash tab, enabled only when a probe is listed) reads
+  the core DP IDCODE, the target's known part number/vendor, and common
+  DBGMCU_IDCODE registers. It does **not** guess a model from a raw ID: when
+  the imported pack has a unique match the model is proposed and the operator
+  confirms; otherwise raw IDs are shown and the model must be chosen manually.
 
-Select the chip in the shared layout box. Switching it updates the default
-META / APP addresses (both `0x08006000` / `0x08007000`) and the vector-table
-check uses that chip's RAM and flash boundaries. The CLI takes
-`--target gd32f502ve` for `pack` and `verify`.
+The META base / APP start fields are on the Pack tab only; the flash tab
+programs an already-packed image and inherits those values for verification.
+The CLI keeps the built-in presets: `--target gd32f502ve` for `pack`/`verify`.
+Any chip from a CMSIS-Pack can be packed through the GUI without new code.
 
 ### Image layout (PY32F040xB default)
 

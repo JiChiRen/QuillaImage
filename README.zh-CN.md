@@ -11,19 +11,21 @@ Quilla 量产镜像合并 / 烧录上位机。把 QBOOT 与 APP 合成为带合�
 | **烧录** | 选择已有整片 bin → 烧前校验（向量表、META CRC、镜像 SHA-256）→ 经 pyocd 一次性烧到 `0x08000000`。不重新生成 manifest。 |
 | **合并** | 选择 QBOOT + APP（SEALED/SEC 另需私钥）→ 生成 manifest → 合成整片 bin；也可仅导出 256 B META 记录，或校验已有镜像。 |
 
-两页共用 META 起址 / APP 起址。默认值对应 PY32F040xB 参考布局；改地址前须确认
-QBOOT 构建与 APP 链接基址一致。
+### 共用芯片选择区（CMSIS-Pack）
 
-### 支持的芯片
+窗口顶部的「芯片 / CMSIS Pack」两页共用：
 
-| 芯片 | Flash | RAM | 整片镜像 |
-|---|---|---|---|
-| `py32f040xb`（默认） | 128 KiB | 16 KiB | 128 KiB |
-| `gd32f502ve` | 512 KiB | 64 KiB | 512 KiB |
+- 导入厂商 `.pack`，MCU 列表从 pack 的 device 定义解析。
+- 选型号后，其 Flash/RAM 容量（来自 pack 的 memory map）用于打包时的向量表
+  校验；若 pyocd 内建有对应 target，会填入烧录用的型号名。
+- **从目标板读取**（烧录页，仅列出探针后可用）读取内核 DP IDCODE、目标已知
+  的 part number/vendor，以及常见 DBGMCU_IDCODE 寄存器。**不会凭原始 ID 猜
+  型号**：导入的 pack 有唯一匹配时才提示型号并让用户确认，否则只显示原始
+  ID，型号仍需手动选。
 
-在共用布局框选择芯片。切换会更新默认 META / APP 起址（均为
-`0x08006000` / `0x08007000`），向量表校验按该芯片的 RAM / Flash 边界进行。
-命令行 `pack` / `verify` 用 `--target gd32f502ve` 指定。
+META 起址 / APP 起址只在打包页；烧录页烧已打包好的镜像，校验时沿用这些值。
+命令行仍保留内建预设 `pack` / `verify --target gd32f502ve`。
+CMSIS-Pack 里的任意芯片都能通过 GUI 打包，无需改代码。
 
 ### 默认镜像布局（PY32F040xB）
 

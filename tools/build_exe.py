@@ -158,6 +158,9 @@ def main(argv=None) -> int:
         # pyocd loads target/pack backends lazily, and its CMSIS-DAP sequence
         # parser reads sequences.lark from disk at import time. Both the
         # pyocd data files and lark's grammars must be bundled.
+        # Imported lazily from GUI handlers; PyInstaller can't see them.
+        "--hidden-import", "pack_devices",
+        "--hidden-import", "mcu_identity",
         "--hidden-import", "pyocd.core.helpers",
         "--hidden-import", "pyocd.flash.file_programmer",
         "--hidden-import", "pyocd.target",

@@ -24,7 +24,8 @@ The **Chip / CMSIS-Pack** box at the top is shared by both tabs:
 - Import a vendor `.pack`; the MCU list is parsed from its device definitions.
 - Select a model. Its Flash/RAM sizes (from the pack's memory map) drive the
   packer's vector-table checks, and a candidate pyocd target name is filled
-  for flashing when pyocd has a built-in match.
+  for flashing when pyocd has a built-in match; edit it in the shared
+  box otherwise (e.g. GD32E23x has no built-in pyocd target).
 - **Read from target** (flash tab, enabled only when a probe is listed) reads
   the core DP IDCODE, the target's known part number/vendor, and common
   DBGMCU_IDCODE registers. It does **not** guess a model from a raw ID: when

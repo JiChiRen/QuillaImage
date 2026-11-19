@@ -17,7 +17,8 @@ Quilla 量产镜像合并 / 烧录上位机。把 QBOOT 与 APP 合成为带合�
 
 - 导入厂商 `.pack`，MCU 列表从 pack 的 device 定义解析。
 - 选型号后，其 Flash/RAM 容量（来自 pack 的 memory map）用于打包时的向量表
-  校验；若 pyocd 内建有对应 target，会填入烧录用的型号名。
+  校验；若 pyocd 内建有对应 target，会填入烧录用的型号名，否则在公共区手输
+  （如 GD32E23x 无内建 target）。
 - **从目标板读取**（烧录页，仅列出探针后可用）读取内核 DP IDCODE、目标已知
   的 part number/vendor，以及常见 DBGMCU_IDCODE 寄存器。**不会凭原始 ID 猜
   型号**：导入的 pack 有唯一匹配时才提示型号并让用户确认，否则只显示原始

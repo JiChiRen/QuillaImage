@@ -165,11 +165,35 @@ def main(argv=None) -> int:
         "--hidden-import", "pyocd.board",
         "--collect-data", "pyocd",
         "--collect-data", "lark",
+        # CMSIS-DAP v2 probes (e.g. WCH-Link) use pyusb's libusb1 backend,
+        # which loads libusb-1.0.dll from the libusb_package directory via
+        # pkg_resources. Without collecting this package the DLL lands in
+        # _internal/ but pyusb cannot find it, and probe enumeration returns
+        # zero even though the probe is attached.
+        "--collect-data", "libusb_package",
         "--exclude-module", "numpy",
         "--exclude-module", "PIL",
         "--exclude-module", "pytest",
         "--exclude-module", "unittest",
     ]
+    # cmsis_pack_manager loads its native DLL with
+    # ffi.dlopen(os.path.join(os.path.dirname(__file__), "cmsis_pack_manager.dll"))
+    # — a dynamic path PyInstaller cannot see. Without the DLL at that exact
+    # package path, importing pyocd.board raises OSError, which propagates
+    # through Session.get_current() and makes probe enumeration return zero.
+    try:
+        import cmsis_pack_manager
+        # The DLL sits in the inner package: cmsis_pack_manager/cmsis_pack_manager/
+        cpm_dir = os.path.join(os.path.dirname(cmsis_pack_manager.__file__),
+                               "cmsis_pack_manager")
+        cpm_dll = os.path.join(cpm_dir, "cmsis_pack_manager.dll")
+        if os.path.isfile(cpm_dll):
+            sep = ";" if os.name == "nt" else ":"
+            args += ["--add-binary",
+                     "%s%scmsis_pack_manager/cmsis_pack_manager" % (cpm_dll, sep)]
+    except ImportError:
+        pass
+
     icon = os.path.join(ROOT, "assets", "quilla.ico")
     if os.path.isfile(icon):
         args += ["--icon", icon]

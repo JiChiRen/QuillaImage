@@ -28,7 +28,7 @@ import sys
 import traceback
 
 # 无界面自检：不导入 Qt，便于在没装 PySide6 的机器上确认核心与依赖状态。
-if "--check" in sys.argv:
+if "--check" in sys.argv or "--probe-check" in sys.argv:
     import importlib.util
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -40,6 +40,24 @@ if "--check" in sys.argv:
         sys.exit(1)
     print("PySide6:", "installed" if importlib.util.find_spec("PySide6") else "MISSING (pip install PySide6)")
     print("pyocd  :", "installed" if importlib.util.find_spec("pyocd") else "MISSING (pip install pyocd)")
+    if "--probe-check" in sys.argv:
+        # Verify probe enumeration in the SAME frozen runtime the GUI uses.
+        # Useful for diagnosing a "no probe" list without clicking the GUI.
+        try:
+            from pyocd.core.helpers import ConnectHelper
+            from pyocd.probe.pydapaccess import dap_access_cmsis_dap as _dac
+            print("v1 backend:", _dac.USB_BACKEND, "v2 backend:", _dac.USB_BACKEND_V2)
+            try:
+                print("interfaces:", len(_dac._get_interfaces()))
+            except Exception as _e:
+                print("interfaces FAILED:", type(_e).__name__, _e)
+            _ps = ConnectHelper.get_all_connected_probes(blocking=False)
+            print("probes:", len(_ps))
+            for _p in _ps:
+                print("  ", _p.description, _p.unique_id)
+        except Exception as _e:
+            import traceback
+            traceback.print_exc()
     sys.exit(0)
 
 try:
@@ -68,6 +86,26 @@ from package import image as core
 try:
     from pyocd.core.helpers import ConnectHelper
     from pyocd.flash.file_programmer import FileProgrammer
+
+    # PyInstaller drops package entry-point metadata, so pyocd's
+    # load_plugin_classes_of_type('pyocd.probe', ...) sees no plugins and
+    # PROBE_CLASSES stays empty -> no probes are ever enumerated. Register
+    # the built-in probe plugins explicitly (same classes as the entry
+    # points in pyocd's dist-info). Safe to call twice; the dict keys are
+    # stable.
+    from pyocd.probe.aggregator import PROBE_CLASSES
+    if not PROBE_CLASSES:
+        from pyocd.probe.cmsis_dap_probe import CMSISDAPProbePlugin
+        from pyocd.probe.jlink_probe import JLinkProbePlugin
+        from pyocd.probe.picoprobe import PicoprobePlugin
+        from pyocd.probe.stlink_probe import StlinkProbePlugin
+        from pyocd.probe.tcp_client_probe import TCPClientProbePlugin
+        for _plugin in (CMSISDAPProbePlugin, JLinkProbePlugin,
+                        PicoprobePlugin, StlinkProbePlugin,
+                        TCPClientProbePlugin):
+            _p = _plugin()
+            if _p.should_load():
+                PROBE_CLASSES[_p.name] = _p.load()
     PYOCD_OK = True
     PYOCD_ERR = ""
 except ImportError as exc:                                  # pragma: no cover

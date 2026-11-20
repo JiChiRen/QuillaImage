@@ -553,8 +553,8 @@ class MainWindow(QMainWindow):
         self.resize(860, 680)
         self.worker = None
         self._probe_worker = None
-        self._held_session = None    # 显式连接的探针 session（"连接探针"持有）
-        self._held_meta = None       # (target, pack, probe_id) 连接时的快照
+        self._held_session = None    # 显式连接的探针 session（"连接探针"持有，仅供读型号）
+        self._pending_flash = False  # 烧录前需先断开持有会话，断开完成后续烧
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -1219,11 +1219,9 @@ class MainWindow(QMainWindow):
             self._refresh_probes()
             return
         self._held_session = session
-        self._held_meta = (self._mcu_target(),
-                           self.ed_chip_pack.text().strip(),
-                           self.cmb_probe.currentData() or "")
         self._set_conn_state(True)
-        self.log("探针已连接并持有；读型号 / 烧录将复用本次连接。")
+        self.log("探针已连接并持有；读型号将复用本次连接，"
+                 "烧录使用独立会话（点击烧录时会自动断开本连接）。")
 
     def _disconnect_probe(self):
         """关闭持有的 session 并重新枚举。close 可能阻塞，放后台线程。"""
@@ -1238,12 +1236,17 @@ class MainWindow(QMainWindow):
     def _disconnect_done(self, error):
         had = self._held_session is not None
         self._held_session = None
-        self._held_meta = None
         self._set_conn_state(False)
         self.log("探针已断开。" if not error else
                  "断开时出错（不影响重新连接）：%s" % error)
         if had:
             self._refresh_probes()
+        # 烧录被"先断开"挂起：持有会话释放后立即用独立会话续烧。
+        # attach 持有会话不适合整片擦除（SWD 易 FAULT / No ACK 且无重试），
+        # 瞬时会话走 halt + 降时钟三级重试，Ali 上板已验证可自愈。
+        if self._pending_flash:
+            self._pending_flash = False
+            self._start_flash()
 
     def _set_conn_state(self, connected: bool):
         self.btn_conn.setText("断开探针" if connected else "连接探针")
@@ -1391,19 +1394,21 @@ class MainWindow(QMainWindow):
             return
         if not self._target_ready():
             return
-        # 复用显式连接的 session：target / pack 必须与连接时一致，
-        # 否则 session 的 target_override 已经固定，烧进去会张冠李戴。
-        use_held = None
+        # 烧录一律用独立瞬时会话：显式持有的 attach 会话是为读型号设计的
+        # （不 halt 目标），整片擦除期间 SWD 极易 FAULT / No ACK，且持有
+        # 会话模式不做失败重试（链路状态未知），Ali 上板连续 3 次烧录失败。
+        # 若当前有持有连接，先异步断开，断开回调里再续烧（瞬时会话带
+        # 降时钟三级重试，已验证可自愈）。
         if self._held_session is not None:
-            if self._held_meta != (self._mcu_target(),
-                                   self.ed_chip_pack.text().strip(),
-                                   self.cmb_probe.currentData() or ""):
-                QMessageBox.warning(
-                    self, "型号 / 探针已变更",
-                    "探针是用旧的型号 / 探针连接的（公共区或探针选择后来改过）。\n"
-                    "请先点『断开探针』再重新连接，或直接烧录（自动开关连接）。")
-                return
-            use_held = self._held_session
+            self._pending_flash = True
+            self.log("烧录前先断开 attach 持有会话，随后用独立会话烧录 ...")
+            self._disconnect_probe()
+            return
+        self._start_flash()
+
+    def _start_flash(self):
+        """用独立瞬时会话启动烧录（halt + 降时钟重试，不复用持有会话）。"""
+        image_path = self.ed_flash_image.text().strip()
         self.progress.setValue(0)
         self.btn_flash.setEnabled(False)
         self.worker = FlashWorker(
@@ -1412,7 +1417,7 @@ class MainWindow(QMainWindow):
             self._mcu_target(),
             self.ed_chip_pack.text().strip(),
             self.cb_erase.isChecked(),
-            session=use_held,
+            session=None,               # 始终新建会话，不复用 attach 持有会话
         )
         self.worker.log_line.connect(self.log)
         self.worker.progress_value.connect(self.progress.setValue)
@@ -1426,9 +1431,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "完成", msg)
         else:
             QMessageBox.critical(self, "烧录失败", msg)
-        # 复用显式连接烧录后自动断开并重新枚举，恢复产线"烧完即收"状态。
-        if ok and self._held_session is not None:
-            self._disconnect_probe()
+        # 烧录用独立瞬时会话，用完即关；持有会话只服务读型号，不受影响。
 
     def _do_export(self):
         out_path = self.ed_export_out.text().strip() or DEFAULT_OUT

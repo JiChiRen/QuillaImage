@@ -143,6 +143,45 @@ check("copy-log button present", any(t == "复制日志" for t in all_buttons))
 check("identity button near MCU combo parent",
       win.btn_identity.parent() is win.cmb_mcu.parent())
 
+# ---- 6. warmup session is non-fatal (v1.1.15) ----
+# A warmup that raises (e.g. bad model assert) must not abort the real flash.
+class _WarmBoom:
+    opens = 0
+
+    def open(self):
+        _WarmBoom.opens += 1
+        raise AssertionError("warmup cold-start")
+
+    def close(self):
+        pass
+
+
+class _WarmHelper:
+    def __init__(self):
+        self.calls = 0
+
+    def session_with_chosen_probe(self, **kwargs):
+        self.calls += 1
+        return _WarmBoom()      # every session raises on open
+
+
+gui.FlashWorker.FLASH_WARMUP_DELAY_S = 0
+gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
+gui._PY = {"ConnectHelper": _WarmHelper(),
+           "FileProgrammer": object,
+           "TransferError": Exception}
+w = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
+                    frequency=1000000, auto_slow=False)
+logs, done = [], []
+w.log_line.connect(logs.append)
+w.done.connect(lambda ok, msg: done.append((ok, msg)))
+w.run()
+check("warmup failure is non-fatal",
+      any("预热连接未成功" in s for s in logs) and
+      any("第 1 次尝试" in s for s in logs), str(logs[:6]))
+check("warmup failure still flashes (fails gracefully)",
+      len(done) == 1 and not done[0][0], str(done))
+
 print()
 if FAILS:
     print("FAILED:", FAILS)

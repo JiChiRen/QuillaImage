@@ -238,6 +238,7 @@ class FlashWorker(QThread):
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
 
     FLASH_RETRY_DELAY_S = 1.5
+    FLASH_WARMUP_DELAY_S = 0.3   # 预热"开→关"后给探针的收尾时间
 
     log_line = Signal(str)
     progress_value = Signal(int)
@@ -271,6 +272,53 @@ class FlashWorker(QThread):
         lower = [hz for _, hz in RATE_OPTIONS if hz < base]
         return [base] + lower[:2]       # 最多降到低两档，仍不成则报错
 
+    def _session_kwargs(self, rate_hz: int) -> dict:
+        """构造一次会话的连接参数（预热与正式烧录共用，保证同速率）。"""
+        kwargs = {
+            "blocking": False,
+            "target_override": self.target or "py32f040xb",
+            "frequency": rate_hz,
+        }
+        if self.pack_path:
+            kwargs["pack"] = self.pack_path
+        if self.probe_id:
+            kwargs["unique_id"] = self.probe_id
+            kwargs["return_first"] = False
+        else:
+            kwargs["return_first"] = True
+        return kwargs
+
+    def _warmup(self, ConnectHelper, rate_hz: int):
+        """同速率做一次"开→关"空会话，消耗首次连接的冷启动瞬态。
+
+        Ali 上板观察：无论 5 MHz 还是 10 MHz，第一次烧录固定失败一次，
+        第二次必成功——根因判断是 session.open() 后紧接着 chip_erase 撞上
+        目标 SWJ 切换 / DP 初始化的瞬态窗口，而非速率本身。预热把该窗口
+        消耗掉。预热失败不致命：吞掉异常，继续走正式速率阶梯。
+        """
+        rate_txt = ("%d MHz" % (rate_hz // 1000000)
+                    if rate_hz % 1000000 == 0 else "%d kHz" % (rate_hz // 1000))
+        self.log_line.emit("预热连接（消耗冷启动瞬态）：以 %s 建立空会话 ..."
+                           % rate_txt)
+        warm = None
+        try:
+            warm = ConnectHelper.session_with_chosen_probe(
+                **self._session_kwargs(rate_hz))
+            if warm is not None:
+                warm.open()
+            self.log_line.emit("预热连接完成。")
+        except Exception as exc:                        # pragma: no cover
+            # 预热尽力而为：坏型号的 assert 也在此被吞，不阻断正式烧录。
+            self.log_line.emit("预热连接未成功（忽略，继续正式烧录）：%s: %s"
+                               % (type(exc).__name__, exc))
+        finally:
+            if warm is not None:
+                try:
+                    warm.close()
+                except Exception:
+                    pass
+        time.sleep(self.FLASH_WARMUP_DELAY_S)
+
     def _progress(self, value):
         """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
 
@@ -298,6 +346,10 @@ class FlashWorker(QThread):
         # 并在日志打印本次重连速率（Ali 要求）。
         rates = self._retry_rates()
         max_attempts = len(rates) if owned else 1
+        if owned:
+            # 先用用户设定速率做一次空会话，消耗冷启动瞬态；正式烧录仍从
+            # 同速率开始，失败再按阶梯降速（兜底不变）。
+            self._warmup(ConnectHelper, rates[0])
         attempt = 0
         while True:
             attempt += 1
@@ -307,25 +359,14 @@ class FlashWorker(QThread):
             session = None
             try:
                 if owned:
-                    kwargs = {
-                        "blocking": False,
-                        "target_override": self.target or "py32f040xb",
-                    }
                     rate_hz = rates[attempt - 1]
-                    kwargs["frequency"] = rate_hz
+                    kwargs = self._session_kwargs(rate_hz)
                     rate_txt = ("%d MHz" % (rate_hz // 1000000)
                                 if rate_hz % 1000000 == 0
                                 else "%d kHz" % (rate_hz // 1000))
                     self.log_line.emit(
                         "第 %d 次尝试：以 %s 速率连接探针"
                         % (attempt, rate_txt))
-                    if self.pack_path:
-                        kwargs["pack"] = self.pack_path
-                    if self.probe_id:
-                        kwargs["unique_id"] = self.probe_id
-                        kwargs["return_first"] = False
-                    else:
-                        kwargs["return_first"] = True
 
                     self.log_line.emit("连接调试探针 ...")
                     session = ConnectHelper.session_with_chosen_probe(**kwargs)

@@ -109,10 +109,11 @@ check("transient: retry logged",
       any("自动重试" in s for s in logs))
 check("transient: progress reset before retry",
       any(v == 0 for v in progress))
-check("transient: first attempt uses default clock",
-      "frequency" not in helper.calls[0])
-check("transient: retry lowers clock to 500 kHz",
-      helper.calls[1].get("frequency") == 500000,
+check("transient: first attempt uses selected rate (1 MHz default)",
+      helper.calls[0].get("frequency") == 1000000,
+      str(helper.calls[0].get("frequency")))
+check("transient: retry lowers to next rate (512 kHz)",
+      helper.calls[1].get("frequency") == 512000,
       str(helper.calls[1].get("frequency")))
 
 # ---- 2. persistent fault: gives up after three attempts with guidance ----

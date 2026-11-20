@@ -166,6 +166,15 @@ DEFAULT_OUT = os.path.join(APP_DIR, "out", "combined.bin")
 # 状态文件与应用同目录（删除即恢复默认）。
 STATE_DIR = APP_DIR
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
+
+# 探针 SWD 速率下拉项：(显示文本, Hz)。pyocd 会话选项 'frequency'。
+RATE_OPTIONS = (
+    ("10 MHz", 10000000), ("5 MHz", 5000000), ("4 MHz", 4000000),
+    ("2 MHz", 2000000), ("1 MHz", 1000000), ("512 kHz", 512000),
+    ("256 kHz", 256000), ("128 kHz", 128000),
+)
+RATE_DEFAULT_INDEX = 4          # 1 MHz（原 pyocd 默认，稳妥）
+SLOW_FALLBACK_HZ = 128000       # 自动降速时的最后一档
 def resource_dir():
     """Directory holding bundled read-only assets (PyInstaller extraction dir)."""
     if getattr(sys, "frozen", False):
@@ -226,19 +235,18 @@ def _parse_addr(text: str, name: str) -> int:
 
 
 class FlashWorker(QThread):
-    # SWD 瞬态 FAULT 的递进重试参数：重试间隔与重试时的调试时钟。
-    # 500 kHz 对杜邦线/劣化链路明显更稳，仅重试时使用，正常烧录不减速。
-    FLASH_RETRY_DELAY_S = 1.5
-    FLASH_RETRY_CLOCK_HZ = 500000
-
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
+
+    FLASH_RETRY_DELAY_S = 1.5
 
     log_line = Signal(str)
     progress_value = Signal(int)
     done = Signal(bool, str)
 
     def __init__(self, image_path: str, probe_id: str, target: str,
-                 pack_path: str, chip_erase: bool, session=None, parent=None):
+                 pack_path: str, chip_erase: bool, session=None,
+                 frequency: int = 0, auto_slow: bool = True,
+                 base_address: int = None, parent=None):
         super().__init__(parent)
         self.image_path = image_path
         self.probe_id = probe_id
@@ -247,6 +255,21 @@ class FlashWorker(QThread):
         self.chip_erase = chip_erase
         self.session = session          # 复用显式连接的 session（不为 None 时）
         self.used_held = session is not None
+        self.frequency = frequency      # 用户设定的连接/通讯速率（Hz，0=pyocd 默认）
+        self.auto_slow = auto_slow      # 失败时是否自动降速重连
+        self.base_address = (core.FLASH_BASE if base_address is None
+                             else base_address)
+
+    def _retry_rates(self):
+        """返回每次尝试用的速率列表：先用户设定值，再逐级降档（如启用）。
+
+        列表长度即尝试次数。不自动降速时三次都用用户设定速率。
+        """
+        base = self.frequency or RATE_OPTIONS[RATE_DEFAULT_INDEX][1]
+        if not self.auto_slow:
+            return [base, base, base]
+        lower = [hz for _, hz in RATE_OPTIONS if hz < base]
+        return [base] + lower[:2]       # 最多降到低两档，仍不成则报错
 
     def _progress(self, value):
         """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
@@ -271,12 +294,10 @@ class FlashWorker(QThread):
         # 复用显式连接的 session 时由 UI 负责（断开按钮/closeEvent），
         # 这里不 close；瞬时模式照旧用完即关。
         owned = self.session is None
-        # Ali 上板实测（2026-11-19）：整片擦除期间偶发 SWD ACK FAULT
-        # （Unexpected ACK '5'），失败后手动重开一次会话即成功——瞬态
-        # 调试链路问题。递进重试：先原时钟新会话，再降时钟（pyocd 会话
-        # 选项 'frequency'，见 core/session.py:660），共 3 次；复用持有
-        # 会话时链路状态未知，不自动重试，交给操作员断开重连。
-        max_attempts = 3 if owned else 1
+        # 速率阶梯：用户设定值 +（可选）逐级降档。每次都用新会话重连，
+        # 并在日志打印本次重连速率（Ali 要求）。
+        rates = self._retry_rates()
+        max_attempts = len(rates) if owned else 1
         attempt = 0
         while True:
             attempt += 1
@@ -290,12 +311,14 @@ class FlashWorker(QThread):
                         "blocking": False,
                         "target_override": self.target or "py32f040xb",
                     }
-                    if attempt > 1:
-                        # 错误信息自带的建议就是 reduce debugger clock。
-                        kwargs["frequency"] = self.FLASH_RETRY_CLOCK_HZ
-                        self.log_line.emit(
-                            "第 %d 次尝试：降低调试时钟至 %d kHz"
-                            % (attempt, self.FLASH_RETRY_CLOCK_HZ // 1000))
+                    rate_hz = rates[attempt - 1]
+                    kwargs["frequency"] = rate_hz
+                    rate_txt = ("%d MHz" % (rate_hz // 1000000)
+                                if rate_hz % 1000000 == 0
+                                else "%d kHz" % (rate_hz // 1000))
+                    self.log_line.emit(
+                        "第 %d 次尝试：以 %s 速率连接探针"
+                        % (attempt, rate_txt))
                     if self.pack_path:
                         kwargs["pack"] = self.pack_path
                     if self.probe_id:
@@ -318,7 +341,7 @@ class FlashWorker(QThread):
                 erase_arg = "chip" if self.chip_erase else None
                 self.log_line.emit(
                     "烧录 %s -> 0x%08X（整片擦除=%s）"
-                    % (self.image_path, core.FLASH_BASE,
+                    % (self.image_path, self.base_address,
                        "是" if self.chip_erase else "否")
                 )
                 if attempt > 1:
@@ -331,7 +354,7 @@ class FlashWorker(QThread):
                     keep_unwritten=True,
                     no_reset=False,
                     progress=self._progress,
-                ).program(self.image_path, base_address=core.FLASH_BASE)
+                ).program(self.image_path, base_address=self.base_address)
                 session.target.reset()
                 if attempt > 1:
                     self.log_line.emit("（第 %d 次尝试成功）" % attempt)
@@ -346,10 +369,11 @@ class FlashWorker(QThread):
                         % exc)
                     continue                    # finally 负责关掉本次会话
                 if owned:
+                    slow_note = "（含降低速率）" if self.auto_slow else ""
                     self.done.emit(False, (
-                        "SWD 通信失败（%s）。已自动重试 2 次（含降低时钟）"
+                        "SWD 通信失败（%s）。已自动重试 %d 次%s"
                         "仍未成功：请检查杜邦线 / 供电，重插拔探针后再试。"
-                        % exc))
+                        % (exc, max_attempts - 1, slow_note)))
                 else:
                     self.done.emit(False, (
                         "SWD 通信失败（%s）。请点『断开探针』后重新连接，"
@@ -401,12 +425,13 @@ class IdentityWorker(QThread):
     done_log = Signal(str)          # extra traceback for the log pane
 
     def __init__(self, probe_id: str, target: str, pack_path: str,
-                 session=None, parent=None):
+                 session=None, frequency: int = 0, parent=None):
         super().__init__(parent)
         self.probe_id = probe_id
         self.target = target
         self.pack_path = pack_path
         self.session = session
+        self.frequency = frequency
 
     def run(self):
         session = None
@@ -430,6 +455,8 @@ class IdentityWorker(QThread):
                     # 目标，上电初期最易诱发探针固件挂死。
                     "connect_mode": "attach",
                 }
+                if self.frequency:
+                    kwargs["frequency"] = self.frequency
                 if self.pack_path:
                     kwargs["pack"] = self.pack_path
                 if self.probe_id:
@@ -463,11 +490,13 @@ class ConnWorker(QThread):
     done = Signal(object, str)      # (Session or None, error_text)
     done_log = Signal(str)          # extra traceback for the log pane
 
-    def __init__(self, probe_id: str, target: str, pack_path: str, parent=None):
+    def __init__(self, probe_id: str, target: str, pack_path: str,
+                 frequency: int = 0, parent=None):
         super().__init__(parent)
         self.probe_id = probe_id
         self.target = target
         self.pack_path = pack_path
+        self.frequency = frequency
 
     def run(self):
         mods, err = _ensure_pyocd()
@@ -482,6 +511,8 @@ class ConnWorker(QThread):
                 "target_override": self.target or "py32f040xb",
                 "connect_mode": "attach",       # 与 IdentityWorker 同理由
             }
+            if self.frequency:
+                kwargs["frequency"] = self.frequency
             if self.pack_path:
                 kwargs["pack"] = self.pack_path
             if self.probe_id:
@@ -564,15 +595,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         # pyocd 现为惰性导入，是否可用在首次枚举探针时报告（ProbeWorker）。
-        self.log("烧录页整片 bin 固定从 0x%08X 起（已打包好，无需布局信息）；"
-                 "布局参数仅打包页使用。" % core.FLASH_BASE)
+        self.log("烧录地址默认取自 CMSIS Pack 的 flash 起始（可勾选手动设置）；"
+                 "布局参数仅打包页使用。")
         self._restore_state()
         self._hook_autosave()
 
     # ------------------------------------------------------------ 状态持久化
     _STATE_KEYS = (
         "flash_image", "boot", "app", "key",
-        "export_out", "meta_out", "meta_base", "app_start", "chip_pack",
+        "meta_base", "app_start", "chip_pack",
     )
 
     def _state_dict(self) -> dict:
@@ -583,8 +614,7 @@ class MainWindow(QMainWindow):
             "boot": self.ed_boot.text().strip(),
             "app": self.ed_app.text().strip(),
             "key": self.ed_key.text().strip(),
-            "export_out": self.ed_export_out.text().strip(),
-            "meta_out": self.ed_meta_out.text().strip(),
+            "export_out": self.ed_flash_image.text().strip(),
             "meta_base": self.ed_meta_base.text().strip(),
             "app_start": self.ed_app_start.text().strip(),
             "chip_pack": self.ed_chip_pack.text().strip(),
@@ -593,6 +623,10 @@ class MainWindow(QMainWindow):
             "version": self.spin_version.value(),
             "chip_erase": self.cb_erase.isChecked(),
             "preset_seal": self.cb_seal.isChecked(),
+            "rate_index": self.cmb_rate.currentIndex(),
+            "auto_slow": self.cb_auto_slow.isChecked(),
+            "manual_base": self.cb_manual_base.isChecked(),
+            "flash_base": self.ed_flash_base.text().strip(),
         }
         return state
 
@@ -652,6 +686,19 @@ class MainWindow(QMainWindow):
             self.cb_erase.setChecked(bool(state["chip_erase"]))
         if "preset_seal" in state:
             self.cb_seal.setChecked(bool(state["preset_seal"]))
+        if "rate_index" in state:
+            try:
+                self.cmb_rate.setCurrentIndex(int(state["rate_index"]))
+            except (TypeError, ValueError):
+                pass
+        if "auto_slow" in state:
+            self.cb_auto_slow.setChecked(bool(state["auto_slow"]))
+        # 烧录地址：手动设置标志与文本框值。非手动时仍以 pack 为准，
+        # 所以只在手动勾选时恢复保存的地址，避免覆盖 pack 推导值。
+        if "manual_base" in state:
+            self.cb_manual_base.setChecked(bool(state["manual_base"]))
+        if self.cb_manual_base.isChecked() and state.get("flash_base"):
+            self.ed_flash_base.setText(str(state["flash_base"]))
         self.log("[提示] 已从 %s 恢复上次的路径与选项。" % STATE_PATH)
 
     def _hook_autosave(self):
@@ -661,6 +708,10 @@ class MainWindow(QMainWindow):
         self.spin_version.valueChanged.connect(self._save_state)
         self.cb_erase.toggled.connect(self._save_state)
         self.cb_seal.toggled.connect(self._save_state)
+        self.cmb_rate.currentIndexChanged.connect(self._save_state)
+        self.cb_auto_slow.toggled.connect(self._save_state)
+        self.cb_manual_base.toggled.connect(self._save_state)
+        self.ed_flash_base.textChanged.connect(self._save_state)
 
     def closeEvent(self, event):
         # 释放显式连接的探针 session；设备已死时 close 可能慢，但关窗时
@@ -693,14 +744,22 @@ class MainWindow(QMainWindow):
         # MCU 型号就是 pyocd target_override（pack 的 part_number 小写），
         # 同一个东西不分两栏。可编辑：导入 pack 后下拉选，没导入时可手输。
         self.cmb_mcu = QComboBox()
-        self.cmb_mcu.setMinimumWidth(300)
+        self.cmb_mcu.setMinimumWidth(260)
         self.cmb_mcu.setEditable(True)
         self.cmb_mcu.setEditText("py32f040xb")
         self.cmb_mcu.currentIndexChanged.connect(self._on_mcu_changed)
         self.lbl_chip_geo = QLabel("未选择芯片；可从 Pack 导入，或直接输入型号。")
 
+        # 读型号按钮移到 MCU 型号右方（与型号选择同一行）。
+        self.btn_identity = QPushButton("从目标板读取")
+        self.btn_identity.setEnabled(False)   # 枚举出探针后才可用
+        self.btn_identity.clicked.connect(self._do_identity)
+        mrow = QWidget(); mr = QHBoxLayout(mrow)
+        mr.setContentsMargins(0, 0, 0, 0)
+        mr.addWidget(self.cmb_mcu, 1); mr.addWidget(self.btn_identity)
+
         form.addRow("CMSIS Pack:", prow)
-        form.addRow("MCU 型号 / pyocd 目标:", self.cmb_mcu)
+        form.addRow("MCU 型号:", mrow)
         form.addRow("", self.lbl_chip_geo)
         return box
 
@@ -766,12 +825,14 @@ class MainWindow(QMainWindow):
         self.selected_device = self._mcu_by_part(part)
         if self.selected_device is None:
             self.lbl_chip_geo.setText("未选择芯片；可从 Pack 导入，或用预设芯片。")
+            self._apply_pack_flash_base()       # 无 pack 时回退默认地址
             return
         d = self.selected_device
         geo = "Flash %d KiB / RAM %d KiB @ 0x%08X" % (
             d.flash_size // 1024, d.ram_size // 1024, d.ram_start)
         # 型号本身（currentData）就是 pyocd target，不再单独显示一份。
         self.lbl_chip_geo.setText(geo + " | 已就绪，可打包 / 烧录")
+        self._apply_pack_flash_base()           # 地址跟随 pack 的 flash region
         # 打包页布局：按选中的 MCU 几何推导 META/APP 起址仍用默认偏移，
         # image.py 打包时会用 geometry 校验；这里只更新显示。
         self._save_state()
@@ -790,6 +851,33 @@ class MainWindow(QMainWindow):
             return str(data).strip().lower()
         return text.lower()
 
+    # ------------------------------------------------------------ 速率 / 地址
+    @staticmethod
+    def _format_rate(hz: int) -> str:
+        if hz % 1000000 == 0:
+            return "%d MHz" % (hz // 1000000)
+        return "%d kHz" % (hz // 1000)
+
+    def _rate_hz(self) -> int:
+        return int(self.cmb_rate.currentData() or 0)
+
+    def _on_rate_changed(self, _idx=0):
+        # 速率切换立即写日志（Ali 要求：切换速率要 log 打印当前速率）。
+        self.log("探针速率已设为 %s（下次连接 / 烧录生效）"
+                 % self._format_rate(self._rate_hz()))
+
+    def _apply_pack_flash_base(self):
+        """未勾手动设置时，把烧录地址更新为当前 pack 芯片的 flash 起始。"""
+        if self.cb_manual_base.isChecked():
+            return
+        base = (self.selected_device.flash_start if self.selected_device
+                else core.FLASH_BASE)
+        self.ed_flash_base.setText("%08X" % base)
+
+    def _flash_base(self) -> int:
+        """解析烧录地址文本框（十六进制，支持 0x 前缀）。"""
+        return _parse_addr(self.ed_flash_base.text(), "烧录地址")
+
     def _chip_geometry(self) -> dict | None:
         return self.selected_device.geometry() if self.selected_device else None
 
@@ -802,7 +890,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 控件构造
     def _build_layout(self) -> QWidget:
         """打包布局：芯片几何来自公共区，这里只留可覆盖的 META/APP 起址。"""
-        box = QGroupBox("镜像布局（芯片容量取自上方公共区）")
+        box = QGroupBox("镜像布局")
         form = QFormLayout(box)
 
         self.ed_meta_base = QLineEdit("%08X" % core.DEFAULT_META_BASE)
@@ -820,8 +908,8 @@ class MainWindow(QMainWindow):
 
     def _build_tabs(self) -> QWidget:
         tabs = QTabWidget()
-        tabs.addTab(self._build_flash_tab(), "① 烧录")
-        tabs.addTab(self._build_export_tab(), "② 打包")
+        tabs.addTab(self._build_flash_tab(), "烧录")
+        tabs.addTab(self._build_export_tab(), "打包")
         return tabs
 
     def _build_flash_tab(self) -> QWidget:
@@ -840,33 +928,54 @@ class MainWindow(QMainWindow):
         self.cmb_probe.setMinimumWidth(320)
         self.btn_refresh = QPushButton("刷新探针")
         self.btn_refresh.clicked.connect(self._refresh_probes)
-        self.btn_identity = QPushButton("从目标板读取 MCU 型号")
-        self.btn_identity.setEnabled(False)   # 探针连上后才可用
-        self.btn_identity.clicked.connect(self._do_identity)
-        # 显式连接/断开：连接后 session 由 GUI 持有，读型号与烧录复用，
-        # 不再每次操作都做一遍 SWD 握手（上电初期握手失败会让 WCH-Link
-        # 固件挂死、探针从 USB 消失，必须重新插拔）。
+        # 显式连接/断开（仅供读型号复用，烧录用独立瞬时会话）。
         self.btn_conn = QPushButton("连接探针")
         self.btn_conn.setEnabled(False)       # 枚举出探针后才可用
         self.btn_conn.clicked.connect(self._toggle_conn)
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
         r.addWidget(self.cmb_probe, 1); r.addWidget(self.btn_refresh)
         r.addWidget(self.btn_conn)
-        r.addWidget(self.btn_identity)
 
-        self.cb_erase = QCheckBox("烧录前整片擦除（出厂首片建议勾选）")
+        # 探针速率（连接与通讯共用）。"失败时自动降速"控制重连是否降档。
+        self.cmb_rate = QComboBox()
+        for label, hz in RATE_OPTIONS:
+            self.cmb_rate.addItem(label, hz)
+        self.cmb_rate.setCurrentIndex(RATE_DEFAULT_INDEX)
+        self.cmb_rate.currentIndexChanged.connect(self._on_rate_changed)
+        self.cb_auto_slow = QCheckBox("失败时自动降速")
+        self.cb_auto_slow.setChecked(True)
+        self.cb_auto_slow.toggled.connect(self._save_state)
+        rate_row = QWidget(); rr = QHBoxLayout(rate_row)
+        rr.setContentsMargins(0, 0, 0, 0)
+        rr.addWidget(QLabel("探针速率:")); rr.addWidget(self.cmb_rate)
+        rr.addWidget(self.cb_auto_slow); rr.addStretch(1)
+
+        # 烧录起始地址：默认从 CMSIS Pack 的 flash region 取，只读；
+        # 勾选"手动设置"后可直接编辑。
+        self.ed_flash_base = QLineEdit("%08X" % core.FLASH_BASE)
+        self.ed_flash_base.setReadOnly(True)
+        self.cb_manual_base = QCheckBox("手动设置")
+        self.cb_manual_base.toggled.connect(
+            lambda on: self.ed_flash_base.setReadOnly(not on))
+        base_row = QWidget(); br2 = QHBoxLayout(base_row)
+        br2.setContentsMargins(0, 0, 0, 0)
+        br2.addWidget(QLabel("烧录地址 0x")); br2.addWidget(self.ed_flash_base)
+        br2.addWidget(self.cb_manual_base); br2.addStretch(1)
+
+        self.cb_erase = QCheckBox("烧录前整片擦除")
         self.cb_erase.setChecked(True)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.btn_verify_img = QPushButton("校验所选整片 bin")
         self.btn_verify_img.clicked.connect(self._do_verify_file)
-        self.btn_flash = QPushButton("烧录整片 bin 到 0x%08X（不重新生成 manifest）"
-                                     % core.FLASH_BASE)
+        self.btn_flash = QPushButton("烧录整片 bin")
         self.btn_flash.clicked.connect(self._do_flash)
 
         form.addRow("整片 bin 文件:", irow)
         form.addRow("调试探针:", row)
+        form.addRow("速率:", rate_row)
+        form.addRow("烧录地址:", base_row)
         v.addLayout(form)
         v.addWidget(self.cb_erase)
         v.addWidget(self.progress)
@@ -875,6 +984,7 @@ class MainWindow(QMainWindow):
         rb.addWidget(self.btn_verify_img)
         rb.addWidget(self.btn_flash, 1)
         v.addWidget(rowbtn)
+        v.addStretch(1)
         self._refresh_probes()
         return page
 
@@ -885,8 +995,8 @@ class MainWindow(QMainWindow):
         # ---- 布局（芯片几何 + META/APP 起址，仅打包用） ----
         v.addWidget(self._build_layout())
 
-        # ---- 固件镜像（仅打包用） ----
-        box_in = QGroupBox("固件镜像（仅打包用）")
+        # ---- 固件镜像 ----
+        box_in = QGroupBox("固件镜像")
         form = QFormLayout(box_in)
 
         self.ed_boot = QLineEdit()
@@ -928,26 +1038,8 @@ class MainWindow(QMainWindow):
         form.addRow("", btn)
         v.addWidget(box_in)
 
-        # ---- 输出 ----
-        box_out = QGroupBox("导出")
-        form_out = QFormLayout(box_out)
-
-        self.ed_export_out = QLineEdit(DEFAULT_OUT)
-        btn_out = QPushButton("另存为...")
-        btn_out.clicked.connect(lambda: self._save_into(self.ed_export_out))
-        row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
-        r.addWidget(self.ed_export_out, 1); r.addWidget(btn_out)
-
-        self.ed_meta_out = QLineEdit()
-        btn_meta = QPushButton("另存为...")
-        btn_meta.clicked.connect(lambda: self._save_into(self.ed_meta_out))
-        mrow = QWidget(); mr = QHBoxLayout(mrow); mr.setContentsMargins(0, 0, 0, 0)
-        mr.addWidget(self.ed_meta_out, 1); mr.addWidget(btn_meta)
-
-        form_out.addRow("输出整片 bin:", row)
-        form_out.addRow("另存 256 B META 记录（可选）:", mrow)
-        v.addWidget(box_out)
-
+        # 导出路径不在此页设置：点导出时弹保存框，默认定位烧录页的整片 bin
+        # 路径，保存后自动回填烧录页（见 _do_export / _do_meta_only）。
         btn_export = QPushButton("导出 boot + app + manifest 单 bin")
         btn_export.clicked.connect(self._do_export)
         btn_meta_only = QPushButton("仅导出 256 B META 记录")
@@ -972,8 +1064,12 @@ class MainWindow(QMainWindow):
         self.txt_log = QPlainTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setMaximumBlockCount(500)
+        btn_copy = QPushButton("复制日志")
+        btn_copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.txt_log.toPlainText()))
         btn_clear = QPushButton("清除日志")
         btn_clear.clicked.connect(self.txt_log.clear)
+        r.addWidget(btn_copy)
         r.addWidget(btn_clear)
         v.addWidget(row)
         v.addWidget(self.txt_log)
@@ -995,14 +1091,6 @@ class MainWindow(QMainWindow):
     def _pick_into(self, edit: QLineEdit, title: str, filt: str = "*.bin"):
         path, _ = QFileDialog.getOpenFileName(
             self, title, self._start_dir(edit), filt)
-        if path:
-            edit.setText(path)
-
-    def _save_into(self, edit: QLineEdit):
-        cur = edit.text().strip()
-        start = cur or os.path.join(self._start_dir(edit),
-                                    os.path.basename(DEFAULT_OUT))
-        path, _ = QFileDialog.getSaveFileName(self, "输出文件", start, "*.bin")
         if path:
             edit.setText(path)
 
@@ -1203,7 +1291,8 @@ class MainWindow(QMainWindow):
         self.btn_conn.setText("连接中 ...")
         self.log("连接探针（attach 模式，不打断目标运行）...")
         self.conn_worker = ConnWorker(
-            probe_id, self._mcu_target(), self.ed_chip_pack.text().strip())
+            probe_id, self._mcu_target(), self.ed_chip_pack.text().strip(),
+            frequency=self._rate_hz())
         self.conn_worker.done_log.connect(
             lambda tb: self.log("[堆栈]\n" + tb.strip()))
         self.conn_worker.done.connect(self._connect_done)
@@ -1304,7 +1393,8 @@ class MainWindow(QMainWindow):
         self.identity_worker = IdentityWorker(
             probe_id, self._mcu_target(),
             self.ed_chip_pack.text().strip(),
-            session=self._held_session)
+            session=self._held_session,
+            frequency=self._rate_hz())
         self.identity_worker.done_log.connect(
             lambda tb: self.log("[堆栈]\n" + tb.strip()))
         self.identity_worker.done.connect(self._identity_done)
@@ -1328,39 +1418,29 @@ class MainWindow(QMainWindow):
             self.log("读取 MCU 型号失败（target=%s）：%s" % (target, error))
             self._refresh_probes()
             return
-        body = ident.summary()
+        # 只读 pyocd target 报告的型号，不凭原始 ID 猜型号。
         read_model = (ident.part_number or "").strip()
-        # 读到型号且有回值：弹窗问用户是否采用，避免手动选错。
-        # 只有 pyocd target 自己报告的型号才算数；原始 ID 不用来猜型号。
-        if read_model:
-            matched = [d for d in self.pack_devices
-                       if d.part_number.lower() == read_model.lower()]
-            body += "\n\npyocd 报告目标型号：%s" % read_model
-            if len(matched) == 1:
-                body += "\n已导入 Pack 中对应：%s" % matched[0].label
-            body += ("\n\n当前公共区选择：%s\n是否改用读到的型号 %s？"
-                     % (self._mcu_target(), read_model))
-            ans = QMessageBox.question(
-                self, "芯片型号确认", body,
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if ans == QMessageBox.Yes:
-                idx = self.cmb_mcu.findData(read_model)
-                if idx >= 0:
-                    self.cmb_mcu.setCurrentIndex(idx)
-                    self.log("已按读取结果切换型号：%s" % read_model)
-                else:
-                    self.cmb_mcu.setEditText(read_model.lower())
-                    self.log("已按读取结果填写型号：%s" % read_model)
+        matched = ([d for d in self.pack_devices
+                    if d.part_number.lower() == read_model.lower()]
+                   if read_model else [])
+        if len(matched) == 1:
+            # 唯一匹配：自动切换型号，简洁提示（不弹冗长确认框）。
+            dev = matched[0]
+            idx = self.cmb_mcu.findData(dev.part_number)
+            if idx >= 0:
+                self.cmb_mcu.setCurrentIndex(idx)
             else:
-                self.log("用户保留当前型号：%s" % self._mcu_target())
+                self.cmb_mcu.setEditText(dev.part_number.lower())
+            msg = "已匹配 MCU 型号：%s" % dev.part_number
+            QMessageBox.information(self, "MCU 型号", msg)
+            self.log(msg)
         else:
-            # 没有型号回值：只展示原始 ID，不猜型号、不做选择
-            body += ("\n\npyocd 未报告具体型号（只读到上面的原始 ID）。"
-                     "请在公共区手动确认型号后继续。")
-            QMessageBox.information(self, "芯片型号", body)
-            self.log("MCU 型号读取完成（无型号回值）：\n" + ident.summary())
-            return
-        self.log("MCU 型号读取完成：\n" + ident.summary())
+            # 无回值或在 pack 中匹配不到（0 个 / 多个）：明确提示未适配。
+            msg = "未适配：%s" % (read_model or "未读到型号")
+            if not read_model:
+                msg += "（仅读到原始 ID，不据此猜型号）"
+            QMessageBox.warning(self, "MCU 型号", msg)
+            self.log(msg + "\n" + ident.summary())
 
     def _do_flash(self):
         mods, err = _ensure_pyocd()
@@ -1418,6 +1498,9 @@ class MainWindow(QMainWindow):
             self.ed_chip_pack.text().strip(),
             self.cb_erase.isChecked(),
             session=None,               # 始终新建会话，不复用 attach 持有会话
+            frequency=self._rate_hz(),
+            auto_slow=self.cb_auto_slow.isChecked(),
+            base_address=self._flash_base(),
         )
         self.worker.log_line.connect(self.log)
         self.worker.progress_value.connect(self.progress.setValue)
@@ -1434,14 +1517,19 @@ class MainWindow(QMainWindow):
         # 烧录用独立瞬时会话，用完即关；持有会话只服务读型号，不受影响。
 
     def _do_export(self):
-        out_path = self.ed_export_out.text().strip() or DEFAULT_OUT
-        if self._build(out_path, self.ed_meta_out.text().strip()):
-            QMessageBox.information(self, "完成", "已导出：\n%s" % out_path)
+        # 默认定位烧录页的整片 bin 路径；用户确认后回填烧录页并生成。
+        start = self.ed_flash_image.text().strip() or DEFAULT_OUT
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出整片 bin", start, "*.bin")
+        if not path:
+            return
+        if self._build(path, ""):
+            self.ed_flash_image.setText(path)     # 自动更新烧录页路径
+            QMessageBox.information(self, "完成", "已导出：\n%s" % path)
 
     def _do_meta_only(self):
-        start = (self.ed_meta_out.text().strip()
-                 or os.path.join(self._start_dir(self.ed_export_out),
-                                 "meta_record.bin"))
+        start = os.path.join(self._start_dir(self.ed_flash_image),
+                             "meta_record.bin")
         path, _ = QFileDialog.getSaveFileName(
             self, "导出 META 记录", start, "*.bin")
         if not path:

@@ -34,12 +34,14 @@ class PackDevice:
     target_name: str          # pyocd target_override candidate (may be "")
     vendor: str
     label: str                # human-readable one-liner
+    flash_start: int = 0x08000000   # base address of the flash region
 
     def geometry(self) -> dict:
         return {
             "flash_size": self.flash_size,
             "ram_size": self.ram_size,
             "ram_start": self.ram_start,
+            "flash_start": self.flash_start,
             "label": self.label,
         }
 
@@ -82,11 +84,14 @@ def load_pack_devices(pack_path: str) -> list:
         seen.add(part)
         flash = ram = 0
         ram_start = 0x20000000
+        flash_start = 0x08000000
         for region in dev.memory_map:
             name = (getattr(region, "name", "") or "").upper()
             length = int(getattr(region, "length", 0) or 0)
             if getattr(region, "type", None) is not None and "FLASH" in str(region.type).upper():
-                flash = max(flash, length)
+                if length > flash:
+                    flash = length
+                    flash_start = int(getattr(region, "start", flash_start))
             elif "RAM" in str(getattr(region, "type", "")).upper() or name.startswith("IRAM"):
                 ram = max(ram, length)
                 ram_start = int(getattr(region, "start", ram_start))
@@ -96,7 +101,7 @@ def load_pack_devices(pack_path: str) -> list:
             part, flash // 1024, ram // 1024)
         out.append(PackDevice(
             part_number=part, flash_size=flash, ram_size=ram,
-            ram_start=ram_start,
+            ram_start=ram_start, flash_start=flash_start,
             target_name=_match_target(part, getattr(dev, "vendor", ""), known),
             vendor=getattr(dev, "vendor", "") or "",
             label=label))
@@ -116,6 +121,9 @@ def selftest() -> None:
     dev = PackDevice("TEST", 0x20000, 0x4000, 0x20000000, "", "", "TEST")
     g = dev.geometry()
     assert g["flash_size"] == 0x20000 and g["ram_size"] == 0x4000
+    assert g["flash_start"] == 0x08000000
+    dev2 = PackDevice("T2", 0x20000, 0x4000, 0x20000000, "", "", "T2", 0x08010000)
+    assert dev2.geometry()["flash_start"] == 0x08010000
     print("pack_devices selftest: OK")
 
 

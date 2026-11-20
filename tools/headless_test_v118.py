@@ -102,9 +102,8 @@ def run_worker(session=None):
     return logs, done, progress
 
 
-# keep the synchronous test fast - no real sleep for connect/retry
+# keep the synchronous test fast - no real sleep between retries
 gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
-gui.FlashWorker.POST_CONNECT_DELAY_S = 0
 
 # ---- 1. transient fault: auto-retry with a fresh session succeeds ----
 FakeSession.opens = FakeSession.closes = 0
@@ -120,18 +119,18 @@ check("transient: two attempt sessions", FakeSession.opens == 2,
       "opens=%d" % FakeSession.opens)
 check("transient: all sessions closed", FakeSession.closes == 2,
       "closes=%d" % FakeSession.closes)
-check("transient: retry logged",
-      any("自动重试" in s for s in logs))
-check("post-connect settle logged",
-      any("链路稳定后开始烧录" in s for s in logs))
+check("transient: retry logged (concise)",
+      any("重建链路后重试" in s for s in logs) and
+      not any("Traceback" in s for s in logs))
 check("transient: progress reset before retry",
       any(v == 0 for v in progress))
-# calls[0] = first attempt at selected rate, [1] = lowered retry
+# v1.1.18: first two attempts use the SAME rate (link rebuild is the fix),
+# only the 3rd would drop a step.
 check("transient: first attempt uses selected rate (1 MHz)",
       helper.calls[0].get("frequency") == 1000000,
       str(helper.calls[0].get("frequency")))
-check("transient: retry lowers to next rate (512 kHz)",
-      helper.calls[1].get("frequency") == 512000,
+check("transient: retry keeps same rate",
+      helper.calls[1].get("frequency") == 1000000,
       str(helper.calls[1].get("frequency")))
 
 # ---- 2. persistent fault: gives up after three attempts with guidance ----

@@ -54,7 +54,8 @@ fw = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
                      frequency=2000000, auto_slow=True, base_address=0x08000000)
 check("FlashWorker frequency stored", fw.frequency == 2000000)
 rates = fw._retry_rates()
-check("retry ladder lowers clock", rates[0] == 2000000 and rates[1] < rates[0],
+check("retry ladder lowers only on 3rd",
+      rates[0] == rates[1] == 2000000 and rates[2] < rates[0],
       str(rates))
 fw_noslow = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
                             frequency=4000000, auto_slow=False)
@@ -143,27 +144,35 @@ check("copy-log button present", any(t == "复制日志" for t in all_buttons))
 check("identity button near MCU combo parent",
       win.btn_identity.parent() is win.cmb_mcu.parent())
 
-# ---- 6. post-connect settle delay before program (v1.1.17) ----
-# Root cause: 1st attempt opened the session then programmed immediately;
-# 2nd attempt always waited 1.5 s between sessions and always succeeded.
-# The fix waits after connect before program (not an API-level patch).
-check("post-connect delay defined",
-      hasattr(gui.FlashWorker, "POST_CONNECT_DELAY_S") and
-      gui.FlashWorker.POST_CONNECT_DELAY_S >= 1.0,
-      str(gui.FlashWorker.POST_CONNECT_DELAY_S))
+# ---- 6. retry ladder + concise first-failure log (v1.1.18) ----
+# Ali: 1st failure rebuilds SWD link; same-rate 2nd attempt succeeds.
+# So first two attempts use the set rate; only the 3rd drops a step.
+fw = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
+                     frequency=1000000, auto_slow=True)
+rates = fw._retry_rates()
+check("first two retries same rate", rates[0] == rates[1] == 1000000,
+      str(rates))
+check("third retry drops one step", rates[2] == 512000, str(rates))
+fw2 = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
+                      frequency=1000000, auto_slow=False)
+check("no-auto-slow keeps all same",
+      fw2._retry_rates() == [1000000, 1000000, 1000000],
+      str(fw2._retry_rates()))
 
-import types  # noqa: E402
-_sleeps = []
+# fake pyocd: first program raises TransferError, second succeeds
+class _SwdError(Exception):
+    pass
 
 
-class _ProbeTarget:
+class _Target:
     def reset(self):
         pass
 
 
 class _Probe:
-    def __init__(self):
-        self.target = _ProbeTarget()
+    def __init__(self, fail_first):
+        self.target = _Target()
+        self.fail_first = fail_first
 
     def open(self):
         pass
@@ -173,41 +182,64 @@ class _Probe:
 
 
 class _ProbeHelper:
+    def __init__(self, fail_first):
+        self.fail_first = fail_first
+
     def session_with_chosen_probe(self, **kwargs):
-        return _Probe()
+        return _Probe(self.fail_first)
 
 
-class _OKProgrammer:
+class _FlakyProgrammer:
+    calls = 0
+
     def __init__(self, *a, **k):
         pass
 
     def program(self, *a, **k):
+        _FlakyProgrammer.calls += 1
+        if _FlakyProgrammer.calls == 1:
+            raise _SwdError("SWD/JTAG communication failure (No ACK); check USB cable")
+
+
+gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
+gui._PY = {"ConnectHelper": _ProbeHelper(True),
+           "FileProgrammer": _FlakyProgrammer,
+           "TransferError": _SwdError}
+_FlakyProgrammer.calls = 0
+w = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
+                    frequency=1000000, auto_slow=True)
+logs, done = [], []
+w.log_line.connect(logs.append)
+w.done.connect(lambda ok, msg: done.append((ok, msg)))
+w.run()
+check("first failure is concise (no traceback)",
+      any("SWD 通信抖动" in s and "重建链路后重试" in s for s in logs) and
+      not any("Traceback" in s for s in logs), str(logs[:5]))
+check("retry succeeds at same rate",
+      len(done) == 1 and done[0][0] and
+      any("第 2 次尝试：以 1 MHz" in s for s in logs),
+      str(done) + " | " + str([s for s in logs if "次尝试" in s]))
+
+# all-fail still prints traceback for diagnosis
+class _AlwaysFailProgrammer:
+    def __init__(self, *a, **k):
         pass
 
+    def program(self, *a, **k):
+        raise _SwdError("No ACK")
 
-gui._PY = {"ConnectHelper": _ProbeHelper(),
-           "FileProgrammer": _OKProgrammer,
-           "TransferError": Exception}
-_real_sleep = gui.time.sleep
-gui.time.sleep = lambda sec: _sleeps.append(sec)
-try:
-    w = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
-                        frequency=1000000, auto_slow=False)
-    logs = []
-    w.log_line.connect(logs.append)
-    w.run()
-finally:
-    gui.time.sleep = _real_sleep
-check("sleeps after connect before program",
-      gui.FlashWorker.POST_CONNECT_DELAY_S in _sleeps, str(_sleeps))
-check("settle logged",
-      any("链路稳定后开始烧录" in s for s in logs), str(logs[:6]))
-check("sleeps after reset before close",
-      gui.FlashWorker.POST_RESET_DELAY_S in _sleeps, str(_sleeps))
-check("post-reset settle logged",
-      any("目标稳定后断开" in s for s in logs), str(logs[:8]))
-check("flash succeeds with settle delays",
-      any("烧录完成" in s for s in logs))
+
+gui._PY = {"ConnectHelper": _ProbeHelper(False),
+           "FileProgrammer": _AlwaysFailProgrammer,
+           "TransferError": _SwdError}
+w3 = gui.FlashWorker("x.bin", "", "cortex_m", "", False)
+logs3, done3 = [], []
+w3.log_line.connect(logs3.append)
+w3.done.connect(lambda ok, msg: done3.append((ok, msg)))
+w3.run()
+check("final failure keeps traceback",
+      any("Traceback" in s for s in logs3) and
+      bool(done3) and not done3[0][0], str(done3))
 
 print()
 if FAILS:

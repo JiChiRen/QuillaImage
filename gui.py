@@ -240,16 +240,6 @@ class FlashWorker(QThread):
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
 
     FLASH_RETRY_DELAY_S = 1.5
-    # Ali 上板：第 2 次尝试（会话间等了 1.5 s）必成功，第 1 次 open 后
-    # 立刻 program 必失败——根因是连接后读取过快、链路未稳，不是速率，
-    # 也不是某个 API 不容错（抖动点散见于 get_state / read32 / write_ap）。
-    # 因此连接成功后统一等待该窗口再 program；v1.1.16 的 get_state 打补丁
-    # 已被证伪（打地鼠），删除。
-    POST_CONNECT_DELAY_S = 1.5
-    # 烧录完成后 target.reset() 让目标从 halt 进入 running（APP 启动、时钟/
-    # SWD 引脚可能被 APP 重配），随后立刻 close() 在目标运行时断开 SWD。
-    # 下次连接撞上这个未稳状态 → 擦除期抖动。reset 后等该窗口再断开。
-    POST_RESET_DELAY_S = 0.5
 
     log_line = Signal(str)
     progress_value = Signal(int)
@@ -273,15 +263,18 @@ class FlashWorker(QThread):
                              else base_address)
 
     def _retry_rates(self):
-        """返回每次尝试用的速率列表：先用户设定值，再逐级降档（如启用）。
+        """返回每次尝试的速率列表。
 
-        列表长度即尝试次数。不自动降速时三次都用用户设定速率。
+        Ali 上板：第一次失败后重建链路、同速率第二次即成功，降速是浪费。
+        因此前两次都用用户设定速率（第 2 次只是重建链路重试），只有连续
+        失败 2 次后才降速一档作为兜底。不自动降速时三次都同速率。
         """
         base = self.frequency or RATE_OPTIONS[RATE_DEFAULT_INDEX][1]
         if not self.auto_slow:
             return [base, base, base]
         lower = [hz for _, hz in RATE_OPTIONS if hz < base]
-        return [base] + lower[:2]       # 最多降到低两档，仍不成则报错
+        # [设定, 设定, 低一档]：前两次同速率重建链路，第三次才降速兜底
+        return [base, base, lower[0]] if lower else [base, base, base]
 
     def _session_kwargs(self, rate_hz: int) -> dict:
         """构造一次会话的连接参数（每次重试共用，保证速率按阶梯递进）。"""
@@ -350,11 +343,6 @@ class FlashWorker(QThread):
                         raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
 
                     session.open()
-                    # 连接成功后等链路稳定再 program（根因：连接后读取过快）。
-                    self.log_line.emit(
-                        "连接完成，等待 %.1f s 链路稳定后开始烧录 ..."
-                        % self.POST_CONNECT_DELAY_S)
-                    time.sleep(self.POST_CONNECT_DELAY_S)
                 else:
                     session = self.session
                     self.log_line.emit("使用已连接的探针 ...")
@@ -378,28 +366,25 @@ class FlashWorker(QThread):
                     progress=self._progress,
                 ).program(self.image_path, base_address=self.base_address)
                 session.target.reset()
-                # reset 后目标进入 running；等时钟/SWD 稳住再 close，
-                # 避免下次连接撞上未稳状态（Ali 2026-11-20 判断）。
-                self.log_line.emit(
-                    "复位完成，等待 %.1f s 目标稳定后断开 ..."
-                    % self.POST_RESET_DELAY_S)
-                time.sleep(self.POST_RESET_DELAY_S)
                 if attempt > 1:
                     self.log_line.emit("（第 %d 次尝试成功）" % attempt)
                 self.log_line.emit("烧录完成，已复位。")
                 self.done.emit(True, "烧录完成")
                 return
             except TransferError as exc:
-                self.log_line.emit(traceback.format_exc())
                 if attempt < max_attempts:
+                    # 首次抖动是已知的探针固件行为（重建链路即成功），
+                    # 降为简洁提示，不刷大坨 traceback 吓人。
                     self.log_line.emit(
-                        "SWD 通信失败（%s），正在用新会话自动重试 ..."
-                        % exc)
-                    continue                    # finally 负责关掉本次会话
+                        "第 %d 次 SWD 通信抖动（%s），重建链路后重试 ..."
+                        % (attempt, str(exc).split(";")[0].strip()))
+                    continue                    # finally 关会话；下轮重建链路
+                # 三次都失败才打印完整堆栈，便于诊断真实硬件故障。
+                self.log_line.emit(traceback.format_exc())
                 if owned:
-                    slow_note = "（含降低速率）" if self.auto_slow else ""
+                    slow_note = "（末次已降速）" if self.auto_slow else ""
                     self.done.emit(False, (
-                        "SWD 通信失败（%s）。已自动重试 %d 次%s"
+                        "SWD 通信失败（%s）。已重试 %d 次%s"
                         "仍未成功：请检查杜邦线 / 供电，重插拔探针后再试。"
                         % (exc, max_attempts - 1, slow_note)))
                 else:

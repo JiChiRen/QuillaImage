@@ -134,6 +134,20 @@ win._match_done(DEVS[3], "")
 check("GUI selects matched model", win._mcu_target() == "m04", win._mcu_target())
 check("GUI pairing-success dialog",
       any("配对成功：M04" in d[1] for d in DLG), str(DLG))
+# all DEVS share identical flash/RAM/base -> all listed as compatible
+ok_dialogs = [d[1] for d in DLG if "配对成功" in d[1]]
+check("compatible models listed",
+      bool(ok_dialogs) and "兼容烧录型号" in ok_dialogs[0] and
+      all(m in ok_dialogs[0] for m in ("M01", "M02", "M03", "M04", "M05")),
+      ok_dialogs[0] if ok_dialogs else "")
+
+# different geometry is excluded from the compatible list
+win.pack_devices = DEVS + [PackDevice("OTHER", 0x40000, 0x4000,
+                                      0x20000000, "", "", "OTHER")]
+check("different flash excluded from compat",
+      win._compatible_models(DEVS[0]) == [d.part_number for d in DEVS],
+      str(win._compatible_models(DEVS[0])))
+win.pack_devices = DEVS
 
 DLG.clear()
 win._match_done(None, "")

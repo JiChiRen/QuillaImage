@@ -1526,6 +1526,20 @@ class MainWindow(QMainWindow):
                             vendor=getattr(dev, "vendor", "") or "")
         self._identity_done(ident, "")
 
+    def _compatible_models(self, dev) -> list:
+        """返回 pack 中 flash / RAM 容量与 flash 起始都一致的型号名列表。
+
+        这些型号在 SWD 总线上无法区分，用同一个型号配对成功只说明几何
+        匹配，不代表是板上真实料号；列出供操作员核对（不猜型号）。
+        """
+        out = []
+        for d in self.pack_devices:
+            if (d.flash_size == dev.flash_size and
+                    d.ram_size == dev.ram_size and
+                    d.flash_start == dev.flash_start):
+                out.append(d.part_number)
+        return out
+
     def _identity_done(self, ident, error):
         self.btn_identity.setEnabled(True)
         if error or ident is None:
@@ -1557,9 +1571,12 @@ class MainWindow(QMainWindow):
                 self.cmb_mcu.setCurrentIndex(idx)
             else:
                 self.cmb_mcu.setEditText(dev.part_number.lower())
+            compat = self._compatible_models(dev)
             msg = "配对成功：%s" % dev.part_number
+            if compat:
+                msg += "\n兼容烧录型号：%s" % "、".join(compat)
             QMessageBox.information(self, "MCU 型号", msg)
-            self.log(msg)
+            self.log(msg.replace("\n", "；"))
         else:
             # 无回值或在 pack 中匹配不到（0 个 / 多个）：明确提示未适配。
             msg = "未适配：%s" % (read_model or "未读到型号")

@@ -49,8 +49,8 @@ _STRINGS = {
         "en": "No chip selected; import a Pack or type a model.",
     },
     "geo_ready": {
-        "zh": "%s | 已就绪，可打包 / 烧录",
-        "en": "%s | Ready to pack / flash",
+        "zh": "%s",
+        "en": "%s",
     },
 
     # ---- 页签 / 布局 ----
@@ -71,10 +71,6 @@ _STRINGS = {
     "lbl_version": {
         "zh": "manifest 版本 (仅 CHECK):",
         "en": "manifest version (CHECK only):",
-    },
-    "cb_seal": {
-        "zh": "SEALED 变体预置 seal（出厂首启免 ~20 s 验签）",
-        "en": "Pre-set seal for SEALED variant (skips ~20 s verify at first boot)",
     },
     "btn_preview": {
         "zh": "解析并预览（load 后显示 CRC32）",

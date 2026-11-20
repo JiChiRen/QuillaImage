@@ -40,7 +40,9 @@ manifest 覆盖 `SHA-256(APP[0:image_len])`。工具从 QBOOT banner 识别变�
 
 - **CHECK**：签名与 seal 全零、无防回滚下限——只校验完整性，不是安全启动。
 - **SEALED / SEC**：需 32 字节 Ed25519 seed（`private.hex`），且 APP 在偏移
-  `0x400` 带 `QAV1` 安全版本记录。SEALED 可预置 seal，首启跳过约 20 s 验签。
+  `0x400` 带 `QAV1` 安全版本记录。SEALED 恒定预置 seal，首启跳过约 20 s 验签
+  （seal 与签名同源：同一私钥、同一描述子；设备端对失配 seal 自动回落全量
+  验签并自写 seal）。
 
 ## 安装与运行
 

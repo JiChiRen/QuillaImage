@@ -52,7 +52,9 @@ if the variant cannot be determined.
   only, not authenticated boot.
 - **SEALED / SEC**: requires a 32-byte Ed25519 seed (`private.hex`) and an APP
   image carrying the `QAV1` security-version record at offset `0x400`. SEALED
-  may preset the seal so first boot skips the ~20 s verification.
+  always presets the seal, so first boot skips the ~20 s verification (the
+  seal is derived from the same private key and descriptor as the signature;
+  the device falls back to full verification and re-seals on any mismatch).
 
 ## Install & run
 

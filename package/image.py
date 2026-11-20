@@ -464,7 +464,6 @@ def parse_meta_record(rec: bytes, *, check_hash: bytes | None = None,
 # ---------------------------------------------------------------- 合成/校验
 def make_combined(boot: bytes, app: bytes, version: int = 0,
                   sign_seed: bytes | None = None,
-                  preset_seal: bool = True,
                   meta_base: int | None = None,
                   app_start: int | None = None,
                   target: str | None = None,
@@ -484,8 +483,10 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
                   image_len(4, LE) || SHA-256(image)（36 B，与设备端
                   quilla_qboot_secure_verify_descriptor 一致）签名；
                   manifest version / floor 取镜像 secver 版本（防降级
-                  从首片生效）；预置 seal（seal_hash=镜像哈希、
+                  从首片生效）；恒定预置 seal（seal_hash=镜像哈希、
                   seal_len=image_len），出厂首启免 ~20 s Ed25519 验签。
+                  seal 与签名同源（同一私钥同一描述子），不改变信任级
+                  别；设备端对失配 seal 自动回落全量验签并自写 seal。
       * SEC    —— 同 SEALED 的签名与版本要求，但不写 seal（设备端
                   SECURE 模式每次启动全量验签，不用 seal）。
     """
@@ -521,7 +522,7 @@ def make_combined(boot: bytes, app: bytes, version: int = 0,
 
         floor = secver_version
         version = secver_version          # manifest version 与镜像版本一致
-        if variant == "SEALED" and preset_seal:
+        if variant == "SEALED":
             seal_hash = image_hash
             seal_len = image_len
 
@@ -840,8 +841,6 @@ def main(argv: list[str] | None = None) -> int:
     p_pack.add_argument("--version", type=int, default=0,
                         help="manifest 版本号（仅 CHECK 变体使用；SEALED/SEC 自动取镜像 secver）")
     p_pack.add_argument("--key", help="Ed25519 私钥 private.hex（SEALED/SEC 变体必填）")
-    p_pack.add_argument("--no-seal", action="store_true",
-                        help="SEALED 变体不预置 seal（出厂首启将执行 ~20 s 全量验签）")
     p_pack.add_argument("--meta-base", type=lambda s: int(s, 0),
                         help="META 记录起址（默认 0x08006000），与 QBOOT 端配置一致")
     p_pack.add_argument("--app-start", type=lambda s: int(s, 0),
@@ -873,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
                 sign_seed = bytes.fromhex(hex_text)
             combined, rec, info = make_combined(
                 boot, app, version=args.version,
-                sign_seed=sign_seed, preset_seal=not args.no_seal,
+                sign_seed=sign_seed,
                 meta_base=args.meta_base, app_start=args.app_start,
                 target=args.target)
             _write_file(args.out, combined)

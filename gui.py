@@ -770,7 +770,6 @@ class MainWindow(QMainWindow):
             "mcu": self.cmb_mcu.currentData() or "",
             "version": self.spin_version.value(),
             "chip_erase": self.cb_erase.isChecked(),
-            "preset_seal": self.cb_seal.isChecked(),
             "rate_index": self.cmb_rate.currentIndex(),
             "auto_slow": self.cb_auto_slow.isChecked(),
             "manual_base": self.cb_manual_base.isChecked(),
@@ -833,8 +832,6 @@ class MainWindow(QMainWindow):
                 pass
         if "chip_erase" in state:
             self.cb_erase.setChecked(bool(state["chip_erase"]))
-        if "preset_seal" in state:
-            self.cb_seal.setChecked(bool(state["preset_seal"]))
         if "rate_index" in state:
             try:
                 self.cmb_rate.setCurrentIndex(int(state["rate_index"]))
@@ -856,7 +853,6 @@ class MainWindow(QMainWindow):
             getattr(self, "ed_" + key).textChanged.connect(self._save_state)
         self.spin_version.valueChanged.connect(self._save_state)
         self.cb_erase.toggled.connect(self._save_state)
-        self.cb_seal.toggled.connect(self._save_state)
         self.cmb_rate.currentIndexChanged.connect(self._save_state)
         self.cb_auto_slow.toggled.connect(self._save_state)
         self.cb_manual_base.toggled.connect(self._save_state)
@@ -1196,10 +1192,6 @@ class MainWindow(QMainWindow):
         row3 = QWidget(); r3 = QHBoxLayout(row3); r3.setContentsMargins(0, 0, 0, 0)
         r3.addWidget(self.ed_key, 1); r3.addWidget(b3)
 
-        self.cb_seal = QCheckBox()
-        self._tr_text(self.cb_seal.setText, "cb_seal")
-        self.cb_seal.setChecked(True)
-
         lbl_boot = QLabel(); self._tr_text(lbl_boot.setText, "lbl_boot")
         lbl_app_img = QLabel(); self._tr_text(lbl_app_img.setText, "lbl_app_img")
         lbl_key = QLabel(); self._tr_text(lbl_key.setText, "lbl_key")
@@ -1208,7 +1200,6 @@ class MainWindow(QMainWindow):
         form.addRow(lbl_app_img, row2)
         form.addRow(lbl_key, row3)
         form.addRow(lbl_ver, self.spin_version)
-        form.addRow("", self.cb_seal)
 
         btn = QPushButton()
         self._tr_text(btn.setText, "btn_preview")
@@ -1344,7 +1335,6 @@ class MainWindow(QMainWindow):
                 self._load_inputs()
             combined, rec, info = core.make_combined(
                 boot, app, version, sign_seed=sign_seed,
-                preset_seal=self.cb_seal.isChecked(),
                 meta_base=meta_base, app_start=app_start,
                 target=self._chip(), geometry=self._chip_geometry())
             core._write_file(out_path, combined)
@@ -1762,7 +1752,6 @@ class MainWindow(QMainWindow):
                 self._load_inputs()
             _, rec, info = core.make_combined(
                 boot, app, version, sign_seed=sign_seed,
-                preset_seal=self.cb_seal.isChecked(),
                 meta_base=meta_base, app_start=app_start,
                 target=self._chip(), geometry=self._chip_geometry())
             core._write_file(path, rec)

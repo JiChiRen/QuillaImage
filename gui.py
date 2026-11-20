@@ -212,7 +212,9 @@ def _parse_addr(text: str, name: str) -> int:
     if not text:
         raise core.ImageError("%s 未填写" % name)
     try:
-        value = int(text, 0)
+        # 输入栏只显示纯十六进制（如 08006000）；int(text, 0) 会把
+        # 前导 0 当八进制而拒绝，所以无前缀时按 16 进制解析。
+        value = int(text, 16) if not text.lower().startswith("0x") else int(text, 0)
     except ValueError:
         raise core.ImageError("%s 不是合法的十六进制地址：%r" % (name, text))
     if not core.FLASH_BASE <= value < core.FLASH_BASE + core.FLASH_SIZE:
@@ -617,7 +619,10 @@ class MainWindow(QMainWindow):
             value = state.get(key)
             if value:
                 edit = getattr(self, "ed_" + key)
-                edit.setText(str(value))
+                text = str(value)
+                if key in ("meta_base", "app_start") and text.lower().startswith("0x"):
+                    text = text[2:]       # 输入栏只显示纯十六进制
+                edit.setText(text)
         # 恢复 CMSIS Pack + 上次选中的 MCU（pack 可能已被移动/删除，
         # 失败就静默保持空选择，不影响其余状态）。
         pack_path = state.get("chip_pack", "")
@@ -672,7 +677,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 公共芯片选择区
     def _build_chip_selector(self) -> QWidget:
         """公共区：导入 CMSIS Pack → 选 MCU 型号 → 供两页共用。"""
-        box = QGroupBox("芯片 / CMSIS Pack（两页共用）")
+        box = QGroupBox("芯片 / CMSIS Pack")
         form = QFormLayout(box)
 
         self.pack_devices = []          # list[pack_devices.PackDevice]
@@ -797,13 +802,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 控件构造
     def _build_layout(self) -> QWidget:
         """打包布局：芯片几何来自公共区，这里只留可覆盖的 META/APP 起址。"""
-        box = QGroupBox("镜像布局（仅打包用；芯片容量取自上方公共区）")
+        box = QGroupBox("镜像布局（芯片容量取自上方公共区）")
         form = QFormLayout(box)
 
-        self.ed_meta_base = QLineEdit("0x%08X" % core.DEFAULT_META_BASE)
-        self.ed_app_start = QLineEdit("0x%08X" % core.DEFAULT_APP_START)
-        form.addRow("META 起址 (十六进制):", self.ed_meta_base)
-        form.addRow("APP 起址 (十六进制):", self.ed_app_start)
+        self.ed_meta_base = QLineEdit("%08X" % core.DEFAULT_META_BASE)
+        self.ed_app_start = QLineEdit("%08X" % core.DEFAULT_APP_START)
+        addr_row = QWidget(); ar = QHBoxLayout(addr_row)
+        ar.setContentsMargins(0, 0, 0, 0)
+        ar.addWidget(QLabel("META 起址 0x")); ar.addWidget(self.ed_meta_base)
+        ar.addWidget(QLabel("APP 起址 0x")); ar.addWidget(self.ed_app_start)
+        form.addRow(addr_row)
         return box
 
     def _chip(self) -> str:
@@ -867,14 +875,6 @@ class MainWindow(QMainWindow):
         rb.addWidget(self.btn_verify_img)
         rb.addWidget(self.btn_flash, 1)
         v.addWidget(rowbtn)
-        v.addStretch(1)
-        v.addWidget(QLabel(
-            "说明：烧录页只烧上面选定的整片 bin（内含 QBOOT / META / APP），\n"
-            "不重新生成 manifest；整片固定从 0x08000000 起烧。\n"
-            "调试探针、CMSIS Pack 与 pyocd 目标在窗口顶部公共区设置；\n"
-            "烧前校验用的 META / APP 起址沿用 ② 打包页的布局设置。\n"
-            "要改固件 / manifest，请到 ② 打包页重新导出。"
-        ))
         self._refresh_probes()
         return page
 
@@ -952,18 +952,15 @@ class MainWindow(QMainWindow):
         btn_export.clicked.connect(self._do_export)
         btn_meta_only = QPushButton("仅导出 256 B META 记录")
         btn_meta_only.clicked.connect(self._do_meta_only)
-        btn_verify = QPushButton("校验已有整片 bin（按布局起址）")
+        btn_verify = QPushButton("校验已有整片 bin")
         btn_verify.clicked.connect(self._do_verify)
 
-        v.addWidget(btn_export)
-        v.addWidget(btn_meta_only)
-        v.addWidget(btn_verify)
-        v.addStretch(1)
-        v.addWidget(QLabel(
-            "打包结果落盘后，到 ① 烧录页烧录该 bin 到 0x%08X 即可，\n"
-            "产线不必再分三次烧录，也不会重复生成 manifest。"
-            % core.FLASH_BASE
-        ))
+        btnrow = QWidget(); br = QHBoxLayout(btnrow)
+        br.setContentsMargins(0, 0, 0, 0)
+        br.addWidget(btn_export, 1)
+        br.addWidget(btn_meta_only, 1)
+        br.addWidget(btn_verify, 1)
+        v.addWidget(btnrow)
         return page
 
     def _build_log(self) -> QWidget:

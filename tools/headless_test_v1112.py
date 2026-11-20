@@ -97,7 +97,7 @@ win._identity_done(ident, "")
 check("unique match auto-selects",
       win._mcu_target() == "gd32f502ve", win._mcu_target())
 check("match message concise",
-      any("已匹配 MCU 型号" in d[1] for d in DLG), str(DLG))
+      any("配对成功" in d[1] for d in DLG), str(DLG))
 
 DLG.clear()
 ident2 = McuIdentity(part_number="GD32F502CB", vendor="GigaDevice")

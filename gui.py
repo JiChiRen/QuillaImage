@@ -97,8 +97,8 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplashScreen,
-        QTabWidget, QVBoxLayout, QWidget,
+        QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
+        QSplashScreen, QTabWidget, QVBoxLayout, QWidget,
     )
 except ImportError:
     print("缺少 PySide6，无法启动图形界面。请先执行：")
@@ -484,6 +484,91 @@ class IdentityWorker(QThread):
                     pass
 
 
+class MatchWorker(QThread):
+    """按 pack 型号队列逐个配对：成功即停，全部失败报告未匹配。
+
+    "配对成功" = 用该型号作为 target_override 能成功建立 pyocd 会话并
+    读到 DP IDCODE（硬件确实响应 SWD）。注意：pyocd 的 part_number 是
+    回填传入值，不能当作硬件型号；这里只把能连接的型号作为候选，并在
+    日志如实说明判据边界。UI 侧显示进度条，避免用户以为程序挂了。
+    """
+
+    progress = Signal(int, int, str)    # (index, total, current model)
+    log_line = Signal(str)
+    done = Signal(object, str)          # (PackDevice or None, error_text)
+
+    def __init__(self, probe_id: str, pack_path: str, devices: list,
+                 frequency: int = 0, parent=None):
+        super().__init__(parent)
+        self.probe_id = probe_id
+        self.pack_path = pack_path
+        self.devices = list(devices)
+        self.frequency = frequency
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        mods, err = _ensure_pyocd()
+        if mods is None:
+            self.done.emit(None, "未检测到 pyocd：%s" % err)
+            return
+        ConnectHelper = mods["ConnectHelper"]
+        total = len(self.devices)
+        if total == 0:
+            self.done.emit(None, "未导入 CMSIS Pack（型号队列为空）")
+            return
+        for i, dev in enumerate(self.devices, 1):
+            if self._stop:
+                self.done.emit(None, "已取消配对")
+                return
+            target = dev.part_number.strip().lower()
+            self.progress.emit(i, total, dev.part_number)
+            self.log_line.emit("配对 %d/%d：尝试型号 %s ..."
+                               % (i, total, dev.part_number))
+            session = None
+            try:
+                kwargs = {
+                    "blocking": False,
+                    "target_override": target,
+                    "connect_mode": "attach",
+                }
+                if self.frequency:
+                    kwargs["frequency"] = self.frequency
+                if self.pack_path:
+                    kwargs["pack"] = self.pack_path
+                if self.probe_id:
+                    kwargs["unique_id"] = self.probe_id
+                    kwargs["return_first"] = False
+                else:
+                    kwargs["return_first"] = True
+                session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                if session is None:
+                    self.log_line.emit("  -> 无可用探针，跳过")
+                    continue
+                session.open()
+                # 能 open 且 DP IDCODE 非 0 视为配对成功（硬件响应 SWD）。
+                dp_idr = int(session.target.dp.dpidr.idr)
+                if not dp_idr:
+                    self.log_line.emit("  -> DP IDCODE 为 0，跳过")
+                    continue
+                self.log_line.emit("  -> 配对成功（DP IDCODE 0x%08X）" % dp_idr)
+                self.done.emit(dev, "")
+                return
+            except Exception as exc:
+                # 坏型号会在 open 中途 assert；记一行，继续下一个。
+                self.log_line.emit("  -> 配对失败：%s: %s"
+                                   % (type(exc).__name__, exc))
+            finally:
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+        self.done.emit(None, "")
+
+
 class ConnWorker(QThread):
     """显式连接探针并持有 session（点"断开探针"才释放）。"""
 
@@ -584,6 +669,8 @@ class MainWindow(QMainWindow):
         self.resize(860, 680)
         self.worker = None
         self._probe_worker = None
+        self.match_worker = None
+        self.match_progress = None
         self._held_session = None    # 显式连接的探针 session（"连接探针"持有，仅供读型号）
         self._pending_flash = False  # 烧录前需先断开持有会话，断开完成后续烧
 
@@ -1379,26 +1466,65 @@ class MainWindow(QMainWindow):
         return True
 
     def _do_identity(self):
-        """连上探针后读取芯片标识，让用户确认型号再继续烧录。"""
+        """按 CMSIS Pack 型号队列逐个配对，成功即停，显示进度条。
+
+        配对判据：用该型号能成功建立 pyocd 会话并读到非零 DP IDCODE，
+        即硬件确实响应 SWD。pyocd 报告的 part_number 是回填传入值，
+        不作为硬件型号依据（见 CR-0085 的边界说明）。
+        """
         if self.worker is not None and getattr(self.worker, "isRunning", lambda: False)():
             QMessageBox.information(self, "忙", "上一次操作还在进行中。")
             return
-        if not self._target_ready():
-            self.btn_identity.setEnabled(False)
+        if self.match_worker is not None and self.match_worker.isRunning():
+            QMessageBox.information(self, "忙", "配对进行中，请稍候。")
+            return
+        if not self.pack_devices:
+            QMessageBox.warning(self, "未导入 Pack",
+                                "请先导入 CMSIS Pack，再按型号队列配对。")
             return
         probe_id = self.cmb_probe.currentData() or ""
         self.btn_identity.setEnabled(False)
-        self.log("读取 MCU 型号 ..." +
-                 ("（复用已连接探针）" if self._held_session is not None else ""))
-        self.identity_worker = IdentityWorker(
-            probe_id, self._mcu_target(),
-            self.ed_chip_pack.text().strip(),
-            session=self._held_session,
-            frequency=self._rate_hz())
-        self.identity_worker.done_log.connect(
-            lambda tb: self.log("[堆栈]\n" + tb.strip()))
-        self.identity_worker.done.connect(self._identity_done)
-        self.identity_worker.start()
+        total = len(self.pack_devices)
+        self.match_progress = QProgressDialog(
+            "正在配对 MCU 型号 ...", "取消", 0, total, self)
+        self.match_progress.setWindowTitle("MCU 型号配对")
+        self.match_progress.setMinimumDuration(0)
+        self.match_progress.setValue(0)
+        self.match_worker = MatchWorker(
+            probe_id, self.ed_chip_pack.text().strip(),
+            self.pack_devices, frequency=self._rate_hz())
+        self.match_worker.progress.connect(self._match_progress)
+        self.match_worker.log_line.connect(self.log)
+        self.match_worker.done.connect(self._match_done)
+        self.match_progress.canceled.connect(self.match_worker.stop)
+        self.match_worker.start()
+
+    def _match_progress(self, index: int, total: int, model: str):
+        if self.match_progress is not None:
+            self.match_progress.setLabelText(
+                "正在配对 %d/%d：%s" % (index, total, model))
+            self.match_progress.setValue(index)
+
+    def _match_done(self, dev, error: str):
+        if self.match_progress is not None:
+            self.match_progress.close()
+            self.match_progress = None
+        self.btn_identity.setEnabled(True)
+        if error and error != "已取消配对":
+            self.log("配对失败：%s" % error)
+        if dev is None:
+            if error == "已取消配对":
+                return
+            QMessageBox.warning(self, "MCU 型号", "未匹配到正确MCU型号")
+            self.log("未匹配到正确MCU型号（已尝试 %d 个型号）"
+                     % len(self.pack_devices))
+            self._refresh_probes()
+            return
+        # 配对成功：走统一的匹配结果处理（自动选中 + 简洁提示）。
+        from mcu_identity import McuIdentity
+        ident = McuIdentity(part_number=dev.part_number,
+                            vendor=getattr(dev, "vendor", "") or "")
+        self._identity_done(ident, "")
 
     def _identity_done(self, ident, error):
         self.btn_identity.setEnabled(True)
@@ -1431,7 +1557,7 @@ class MainWindow(QMainWindow):
                 self.cmb_mcu.setCurrentIndex(idx)
             else:
                 self.cmb_mcu.setEditText(dev.part_number.lower())
-            msg = "已匹配 MCU 型号：%s" % dev.part_number
+            msg = "配对成功：%s" % dev.part_number
             QMessageBox.information(self, "MCU 型号", msg)
             self.log(msg)
         else:

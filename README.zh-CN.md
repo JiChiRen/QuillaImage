@@ -66,6 +66,52 @@ python gui.py                # 或 python gui.py --check 检查依赖
 `state.json`（源码运行时在仓库根目录），工具连同配置可整体拷贝、带到别的
 机器；删除该文件即恢复默认。目录内的 `SHA256SUMS.txt` 覆盖所有分发文件。
 
+## 发行包构建信息
+
+每个发布压缩包由 `tools/build_exe.py` 构建，并以随包的 `SHA256SUMS.txt`
+校验。以下构建信息对应**当前发布版本（v1.1.19）**；构建脚本从同一个
+解释器取工具链版本，重建结果一致。
+
+| 组件 | 版本 |
+|---|---|
+| QuillaImage 发布版本 | v1.1.19 |
+| Windows 目标 | x86-64，PyInstaller **onedir** |
+| Python | 3.14.7 |
+| PyInstaller | 6.22.3 |
+| PySide6 (Qt) | 6.11.2 |
+| pyocd | 0.45.1 |
+| capstone | 5.0.7 |
+| pyserial | 3.5 |
+
+### 发行包二进制白名单（DLL / PYD）
+
+压缩包内有且仅有下列二进制，没有别的。分发的压缩包里若出现本清单之外
+的二进制，则不属于本构建。
+
+- **Qt 核心**：`Qt6Core.dll`、`Qt6Gui.dll`、`Qt6Widgets.dll`、`Qt6Svg.dll`
+- **PySide6 绑定**：`QtCore.pyd`、`QtGui.pyd`、`QtWidgets.pyd`、
+  `QtSvg.pyd`、`pyside6.abi3.dll`、`shiboken6/`（`Shiboken.pyd`、
+  `shiboken6.abi3.dll`）
+- **Qt 插件**：`platforms/`（qwindows、qdirect2d、qminimal、qoffscreen）、
+  `imageformats/`（qico、qsvg）、`styles/`（qmodernwindowsstyle）、
+  `tls/`（qschannelbackend）
+- **Python 运行时**：`python314.dll`、`python3.dll` 及 CPython 标准库
+  扩展（`_asyncio`、`_bz2`、`_ctypes`、`_elementtree`、`_hashlib`、
+  `_lzma`、`_overlapped`、`_queue`、`_socket`、`_ssl`、`_wmi`、`_zstd`、
+  `pyexpat`、`select`、`unicodedata`、`libffi-8.dll`）
+- **MSVC 运行时**：`MSVCP140.dll`（含 `_1`/`_2`）、`VCRUNTIME140.dll`
+  （含 `_1`）
+- **pyocd 烧录链路**：`capstone/lib/capstone.dll`、
+  `cmsis_pack_manager/cmsis_pack_manager.dll`、`hid.cp314-win_amd64.pyd`、
+  `psutil/_psutil_windows.pyd`、`yaml/_yaml...pyd`、
+  `libusb-1.0.dll` / `libusb0.dll` / `libusb_package/libusb-1.0.dll`
+- **TLS（OpenSSL）**：`libcrypto-3*.dll`、`libssl-3*.dll`（CPython `_ssl`
+  也会拉入）
+
+Qt QML/Quick/PDF、OpenGL（含软件光栅化器）、虚拟键盘、翻译和用不到的
+图片格式插件在构建期即被剔除，因此**不在**发行包内。今后某版发布若新增
+二进制，本节和 release notes 会明确说明。
+
 ## 边界
 
 - 工具只准备镜像，**不向设备写入密钥**，也不校验所选密钥是否与某片 QBOOT

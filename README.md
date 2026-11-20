@@ -81,6 +81,53 @@ repository root when run from source), so a portable copy carries its paths
 and options with it. Delete that file to reset. `SHA256SUMS.txt` in the
 folder covers every shipped file.
 
+## Release build information
+
+Every release archive is built by `tools/build_exe.py` and verified against
+the `SHA256SUMS.txt` it ships. The build information below corresponds to
+the **current release (v1.1.19)**; rebuilds regenerate it identically
+because the build script pins the toolchain from one interpreter.
+
+| Component | Version |
+|---|---|
+| QuillaImage release | v1.1.19 |
+| Windows target | x86-64, PyInstaller **onedir** |
+| Python | 3.14.7 |
+| PyInstaller | 6.22.3 |
+| PySide6 (Qt) | 6.11.2 |
+| pyocd | 0.45.1 |
+| capstone | 5.0.7 |
+| pyserial | 3.5 |
+
+### Bundled binaries (DLL / PYD allow-list)
+
+The package contains exactly the binaries below — nothing else. Anything
+not in this list inside a distributed archive is not part of this build.
+
+- **Qt core**: `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, `Qt6Svg.dll`
+- **PySide6 bindings**: `QtCore.pyd`, `QtGui.pyd`, `QtWidgets.pyd`,
+  `QtSvg.pyd`, `pyside6.abi3.dll`, `shiboken6/` (`Shiboken.pyd`,
+  `shiboken6.abi3.dll`)
+- **Qt plugins**: `platforms/` (qwindows, qdirect2d, qminimal, qoffscreen),
+  `imageformats/` (qico, qsvg), `styles/` (qmodernwindowsstyle),
+  `tls/` (qschannelbackend)
+- **Python runtime**: `python314.dll`, `python3.dll` plus CPython standard
+  library extensions (`_asyncio`, `_bz2`, `_ctypes`, `_elementtree`,
+  `_hashlib`, `_lzma`, `_overlapped`, `_queue`, `_socket`, `_ssl`, `_wmi`,
+  `_zstd`, `pyexpat`, `select`, `unicodedata`, `libffi-8.dll`)
+- **MSVC runtime**: `MSVCP140.dll` (+`_1`/`_2`), `VCRUNTIME140.dll` (+`_1`)
+- **pyocd flashing stack**: `capstone/lib/capstone.dll`,
+  `cmsis_pack_manager/cmsis_pack_manager.dll`, `hid.cp314-win_amd64.pyd`,
+  `psutil/_psutil_windows.pyd`, `yaml/_yaml...pyd`,
+  `libusb-1.0.dll` / `libusb0.dll` / `libusb_package/libusb-1.0.dll`
+- **TLS (OpenSSL)**: `libcrypto-3*.dll`, `libssl-3*.dll` (also pulled in by
+  CPython `_ssl`)
+
+Qt QML/Quick/PDF, OpenGL (including the software rasterizer), virtual
+keyboard, translations and unused image-format plugins are pruned at build
+time and are therefore **not** in the package. If a future release adds a
+binary, this section and the release notes will say so.
+
 ## Boundaries
 
 - The tool prepares images. It does not **provision keys** into devices and

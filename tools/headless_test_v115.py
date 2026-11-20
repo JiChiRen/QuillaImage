@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Headless GUI test for v1.1.5: explicit connect/disconnect, session reuse.
+"""Headless GUI test: explicit connect/disconnect + identity session reuse.
+
+Originated at v1.1.5; updated at v1.1.11 when flash stopped reusing the
+held attach session (flash now disconnects first, then uses a fresh session).
 
 Run with the interpreter that has PySide6 + pyocd installed:
     QT_QPA_PLATFORM=offscreen py -3 tools/headless_test_v115.py
@@ -143,7 +146,24 @@ core_pkg._read_file = lambda p: b"\x00" * 16
 win._held_session = fake
 # "cortex_m" is a pyocd builtin target, so _target_ready() passes without a pack.
 win.cmb_mcu.setEditText("cortex_m")
-win._held_meta = ("cortex_m", "", "B8108F063CE6")
+# Since v1.1.11 there is no _held_meta: flash NEVER reuses the held session.
+# Mock DiscWorker so the "disconnect before flash" step completes synchronously
+# (a real DiscWorker would close the fake session on a background thread).
+from PySide6.QtCore import QObject as _QObject, Signal as _Signal, QTimer as _QTimer  # noqa: E402
+
+
+class _FakeDiscWorker(_QObject):
+    done = _Signal(str)
+
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+
+    def start(self):
+        _QTimer.singleShot(0, lambda: self.done.emit(""))
+
+
+orig_disc = gui.DiscWorker
+gui.DiscWorker = _FakeDiscWorker
 flash_calls = []
 orig_flash = gui.FlashWorker
 
@@ -161,23 +181,24 @@ class TrackingFlashWorker(orig_flash):
 
 gui.FlashWorker = TrackingFlashWorker
 win.ed_flash_image.setText("whatever.bin")
-win._held_meta = ("py32f040xb", "", "B8108F063CE6")   # mismatch vs combo
-try:
-    win._do_flash()
-except Exception as e:
-    check("_do_flash mismatch raises nothing", False, repr(e))
-check("flash rejected on target mismatch", len(flash_calls) == 0,
-      "dialogs=%s" % [d[0] for d in DLG_LOG[-2:]])
 
-# ---- 6. matching meta passes the held session into FlashWorker ----
-win._held_meta = (win._mcu_target(), "", "B8108F063CE6")
+# ---- 5/6. flash with a held session: must disconnect first, then use a
+# FRESH session (session=None). Never reuse the attach held session (v1.1.11).
 win._do_flash()
 app.processEvents()
+loop = QEventLoop()
+_QTimer.singleShot(0, loop.quit)
+loop.exec()
 if not flash_calls:
     print("  [debug] dialogs:", DLG_LOG[-2:])
-check("flash got held session", flash_calls and flash_calls[-1] is fake,
+check("flash started after held disconnect", len(flash_calls) == 1,
       "calls=%d" % len(flash_calls))
+check("flash uses fresh session (not held)",
+      bool(flash_calls) and flash_calls[-1] is None,
+      repr(flash_calls[-1] if flash_calls else None))
+check("held session released before flash", win._held_session is None)
 gui.FlashWorker = orig_flash
+gui.DiscWorker = orig_disc
 core_pkg.verify_combined = orig_verify
 core_pkg._read_file = orig_read
 
@@ -191,4 +212,4 @@ print()
 if FAILS:
     print("FAILED:", FAILS)
     sys.exit(1)
-print("all v1.1.5 headless checks passed")
+print("all v1.1.5 (updated v1.1.11) headless checks passed")

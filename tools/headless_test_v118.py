@@ -29,7 +29,19 @@ class FakeTransferError(Exception):
     """Stands in for pyocd.core.exceptions.TransferError."""
 
 
+class _FakeState:
+    RUNNING = "RUNNING"
+    HALTED = "HALTED"
+
+
+class FakeTargetClass:
+    State = _FakeState
+
+
 class FakeTarget:
+    def get_state(self):
+        return _FakeState.RUNNING
+
     def reset(self):
         pass
 
@@ -90,39 +102,34 @@ def run_worker(session=None):
     return logs, done, progress
 
 
-# keep the synchronous test fast - no real sleep between warmup/retries
+# keep the synchronous test fast - no real sleep between retries
 gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
-gui.FlashWorker.FLASH_WARMUP_DELAY_S = 0
 
 # ---- 1. transient fault: auto-retry with a fresh session succeeds ----
 FakeSession.opens = FakeSession.closes = 0
 helper = RecordingConnectHelper()
 gui._PY = {"ConnectHelper": helper,
            "FileProgrammer": FlakyProgrammer(fail_times=1),
-           "TransferError": FakeTransferError}
+           "TransferError": FakeTransferError,
+           "Target": FakeTargetClass}
 logs, done, progress = run_worker()
 check("transient: reported success", done and done[-1][0], str(done))
-# v1.1.15: one warmup session + the actual attempts
-check("transient: warmup + 2 attempt sessions", FakeSession.opens == 3,
+# warmup removed in v1.1.16 (proved ineffective on-board): two attempt sessions
+check("transient: two attempt sessions", FakeSession.opens == 2,
       "opens=%d" % FakeSession.opens)
-check("transient: all sessions closed", FakeSession.closes == 3,
+check("transient: all sessions closed", FakeSession.closes == 2,
       "closes=%d" % FakeSession.closes)
-check("transient: warmup logged",
-      any("预热连接" in s for s in logs))
 check("transient: retry logged",
       any("自动重试" in s for s in logs))
 check("transient: progress reset before retry",
       any(v == 0 for v in progress))
-# calls[0] = warmup at selected rate, [1] = first attempt, [2] = lowered retry
-check("warmup uses selected rate (1 MHz default)",
+# calls[0] = first attempt at selected rate, [1] = lowered retry
+check("transient: first attempt uses selected rate (1 MHz)",
       helper.calls[0].get("frequency") == 1000000,
       str(helper.calls[0].get("frequency")))
-check("transient: first attempt uses selected rate",
-      helper.calls[1].get("frequency") == 1000000,
-      str(helper.calls[1].get("frequency")))
 check("transient: retry lowers to next rate (512 kHz)",
-      helper.calls[2].get("frequency") == 512000,
-      str(helper.calls[2].get("frequency")))
+      helper.calls[1].get("frequency") == 512000,
+      str(helper.calls[1].get("frequency")))
 
 # ---- 2. persistent fault: gives up after three attempts with guidance ----
 FakeSession.opens = FakeSession.closes = 0
@@ -131,7 +138,7 @@ gui._PY["ConnectHelper"] = helper
 gui._PY["FileProgrammer"] = FlakyProgrammer(fail_times=99)
 logs, done, progress = run_worker()
 check("persistent: reported failure", done and not done[-1][0], str(done))
-check("persistent: warmup + three attempts", FakeSession.opens == 4,
+check("persistent: exactly three attempts", FakeSession.opens == 3,
       "opens=%d" % FakeSession.opens)
 check("persistent: guidance mentions re-plug",
       "重插拔" in done[-1][1], done[-1][1][:50])

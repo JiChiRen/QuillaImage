@@ -138,12 +138,14 @@ def _ensure_pyocd():
         try:
             from pyocd.core.helpers import ConnectHelper
             from pyocd.core.exceptions import TransferError
+            from pyocd.core.target import Target
             from pyocd.flash.file_programmer import FileProgrammer
 
             _register_probe_plugins()
             _PY = {"ConnectHelper": ConnectHelper,
                    "FileProgrammer": FileProgrammer,
-                   "TransferError": TransferError}
+                   "TransferError": TransferError,
+                   "Target": Target}
             return _PY, ""
         except ImportError as exc:                          # pragma: no cover
             _PY = str(exc)
@@ -238,7 +240,11 @@ class FlashWorker(QThread):
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
 
     FLASH_RETRY_DELAY_S = 1.5
-    FLASH_WARMUP_DELAY_S = 0.3   # 预热"开→关"后给探针的收尾时间
+    # 擦除轮询期间容错的连续 SWD 抖动次数上限。pyocd flash.py 的
+    # wait_for_completion 只吞 TransferTimeout/Fault，不吞普通 TransferError，
+    # 擦除期间一次 ACK '5'/No ACK 就终止烧录。这里吞掉偶发抖动，但超过
+    # 上限即恢复并重新抛出，避免真挂死时被无限掩盖。
+    GET_STATE_TOLERANCE = 32
 
     log_line = Signal(str)
     progress_value = Signal(int)
@@ -273,7 +279,7 @@ class FlashWorker(QThread):
         return [base] + lower[:2]       # 最多降到低两档，仍不成则报错
 
     def _session_kwargs(self, rate_hz: int) -> dict:
-        """构造一次会话的连接参数（预热与正式烧录共用，保证同速率）。"""
+        """构造一次会话的连接参数（每次重试共用，保证速率按阶梯递进）。"""
         kwargs = {
             "blocking": False,
             "target_override": self.target or "py32f040xb",
@@ -288,36 +294,53 @@ class FlashWorker(QThread):
             kwargs["return_first"] = True
         return kwargs
 
-    def _warmup(self, ConnectHelper, rate_hz: int):
-        """同速率做一次"开→关"空会话，消耗首次连接的冷启动瞬态。
+    def _patch_get_state(self, session, TransferError, Target):
+        """包装 target.get_state 容忍擦除轮询期间的偶发 SWD 抖动。
 
-        Ali 上板观察：无论 5 MHz 还是 10 MHz，第一次烧录固定失败一次，
-        第二次必成功——根因判断是 session.open() 后紧接着 chip_erase 撞上
-        目标 SWJ 切换 / DP 初始化的瞬态窗口，而非速率本身。预热把该窗口
-        消耗掉。预热失败不致命：吞掉异常，继续走正式速率阶梯。
+        pyocd 0.45.1 的 flash.py wait_for_completion 只吞 TransferTimeout/
+        Fault，不吞普通 TransferError（ACK '5'/No ACK）。擦除算法执行期间
+        一次抖动就终止整个烧录。这里在本次 program 期间临时替换 get_state：
+        遇到 TransferError 返回上次已知状态（默认 RUNNING）让轮询继续；
+        连续超过 GET_STATE_TOLERANCE 次则恢复原函数并重抛，避免真挂死被
+        无限掩盖。返回 (restore_fn)，program 结束（含异常）后调用恢复。
         """
-        rate_txt = ("%d MHz" % (rate_hz // 1000000)
-                    if rate_hz % 1000000 == 0 else "%d kHz" % (rate_hz // 1000))
-        self.log_line.emit("预热连接（消耗冷启动瞬态）：以 %s 建立空会话 ..."
-                           % rate_txt)
-        warm = None
-        try:
-            warm = ConnectHelper.session_with_chosen_probe(
-                **self._session_kwargs(rate_hz))
-            if warm is not None:
-                warm.open()
-            self.log_line.emit("预热连接完成。")
-        except Exception as exc:                        # pragma: no cover
-            # 预热尽力而为：坏型号的 assert 也在此被吞，不阻断正式烧录。
-            self.log_line.emit("预热连接未成功（忽略，继续正式烧录）：%s: %s"
-                               % (type(exc).__name__, exc))
-        finally:
-            if warm is not None:
-                try:
-                    warm.close()
-                except Exception:
-                    pass
-        time.sleep(self.FLASH_WARMUP_DELAY_S)
+        tgt = session.target
+        original = tgt.get_state
+        state = {"last": None, "consecutive": 0, "total": 0}
+        running_default = getattr(Target.State, "RUNNING")
+
+        def tolerant():
+            try:
+                result = original()
+                state["last"] = result
+                state["consecutive"] = 0
+                return result
+            except TransferError as exc:
+                state["consecutive"] += 1
+                state["total"] += 1
+                if state["consecutive"] > self.GET_STATE_TOLERANCE:
+                    self.log_line.emit(
+                        "get_state 连续 %d 次 SWD 抖动，判定链路异常，停止容错。"
+                        % state["consecutive"])
+                    raise
+                # 前几次抖动写日志，之后每 8 次汇总一次，避免刷屏。
+                if state["total"] <= 3 or state["total"] % 8 == 0:
+                    self.log_line.emit(
+                        "擦除轮询中 SWD 抖动（第 %d 次，%s），已忽略并继续等待。"
+                        % (state["total"], type(exc).__name__))
+                # 擦除期间目标应在运行算法；返回上次状态或 RUNNING 让
+                # wait_for_completion 的循环继续（它自己的 Timeout 兜底）。
+                return state["last"] if state["last"] is not None else running_default
+
+        def restore():
+            tgt.get_state = original
+            if state["total"]:
+                self.log_line.emit(
+                    "get_state 容错结束：本次共忽略 %d 次 SWD 抖动。"
+                    % state["total"])
+
+        tgt.get_state = tolerant
+        return restore
 
     def _progress(self, value):
         """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
@@ -346,10 +369,6 @@ class FlashWorker(QThread):
         # 并在日志打印本次重连速率（Ali 要求）。
         rates = self._retry_rates()
         max_attempts = len(rates) if owned else 1
-        if owned:
-            # 先用用户设定速率做一次空会话，消耗冷启动瞬态；正式烧录仍从
-            # 同速率开始，失败再按阶梯降速（兜底不变）。
-            self._warmup(ConnectHelper, rates[0])
         attempt = 0
         while True:
             attempt += 1
@@ -357,6 +376,7 @@ class FlashWorker(QThread):
                 # 给探针/链路一点恢复时间（挂死的 WCH-Link 需要收尾）。
                 time.sleep(self.FLASH_RETRY_DELAY_S)
             session = None
+            restore_get_state = None
             try:
                 if owned:
                     rate_hz = rates[attempt - 1]
@@ -387,6 +407,9 @@ class FlashWorker(QThread):
                 )
                 if attempt > 1:
                     self.progress_value.emit(0)
+                # 擦除轮询期间容忍偶发 SWD 抖动（详见 _patch_get_state）。
+                restore_get_state = self._patch_get_state(
+                    session, TransferError, mods["Target"])
                 FileProgrammer(
                     session,
                     chip_erase=erase_arg,
@@ -396,6 +419,8 @@ class FlashWorker(QThread):
                     no_reset=False,
                     progress=self._progress,
                 ).program(self.image_path, base_address=self.base_address)
+                restore_get_state()
+                restore_get_state = None
                 session.target.reset()
                 if attempt > 1:
                     self.log_line.emit("（第 %d 次尝试成功）" % attempt)
@@ -426,6 +451,11 @@ class FlashWorker(QThread):
                     exc, self.target, self.pack_path))
                 return
             finally:
+                if restore_get_state is not None:
+                    try:
+                        restore_get_state()
+                    except Exception:
+                        pass
                 if owned and session is not None:
                     try:
                         session.close()

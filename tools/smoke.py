@@ -19,7 +19,7 @@ exercised all features below; otherwise unexercised plugins look unused.
 """
 
 STEPS = [
-    ("1. Launch", "Run dist/quilla-image/quilla-image.exe; window appears, "
+    ("1. Launch", "Run dist/QuillaImage/QuillaImage.exe; window appears, "
                   "no console window, stderr empty."),
     ("2. Pack / CHECK", "Pack tab: pick a CHECK QBOOT + APP, click preview "
                         "and export; 512 KiB image generated, variant CHECK."),
@@ -35,7 +35,7 @@ STEPS = [
 
 def main() -> int:
     print("QuillaImage release smoke checklist")
-    print("Run each step against dist/quilla-image/. All must pass.\n")
+    print("Run each step against dist/QuillaImage/. All must pass.\n")
     for title, desc in STEPS:
         print("[ ] %s\n    %s\n" % (title, desc))
     print("After steps 1-5, run: python tools/audit_runtime.py")

@@ -1,6 +1,6 @@
 # 剔除不需要的文件 / DLL —— 方法学
 
-适用于 PyInstaller onedir 产物（`dist/quilla-image/`）。目标：把"靠猜删"
+适用于 PyInstaller onedir 产物（`dist/QuillaImage/`）。目标：把"靠猜删"
 变成"可复现判定 + 分级验证"。
 
 ## 四种方法，按可信度排序
@@ -40,8 +40,8 @@ NOT loaded        : 42 files / 32.9 MiB
 
 ```bash
 # Windows SDK 自带：
-dumpbin /dependents dist/quilla-image/quilla-image.exe
-dumpbin /dependents dist/quilla-image/_internal/PySide6/Qt6Gui.dll
+dumpbin /dependents dist/QuillaImage/QuillaImage.exe
+dumpbin /dependents dist/QuillaImage/_internal/PySide6/Qt6Gui.dll
 ```
 
 或第三方 Dependencies（Dependency Walker 现代版）。能列出 PE 静态
@@ -109,7 +109,7 @@ PyInstaller 的 `hook-PySide6.py` 通过
 # PyInstaller 把依赖图写在 Analysis-00.toc（构建后保留）
 python - <<'PY'
 import ast
-d = ast.literal_eval(open("build/freeze/build/quilla-image/Analysis-00.toc",
+d = ast.literal_eval(open("build/freeze/build/QuillaImage/Analysis-00.toc",
                           encoding="utf-8").read())
 entries = d[14] + d[19]     # 二进制模块 + 纯 Python 模块
 for name in ("decimal", "_decimal", "cffi", "hid"):

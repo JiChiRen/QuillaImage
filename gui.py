@@ -113,6 +113,7 @@ except ImportError:                                         # pragma: no cover
     QTSVG_OK = False
 
 from package import image as core
+from i18n import get_lang, set_lang, tr, LANGS, LANG_LABELS
 
 # pyocd 导入实测约 5 s，是"打开工具 6 秒没反应"的最大头，且发生在窗口
 # 出现之前。改为惰性导入：首次用到探针功能（枚举 / 读型号 / 烧录）时
@@ -168,6 +169,16 @@ DEFAULT_OUT = os.path.join(APP_DIR, "out", "combined.bin")
 # 状态文件与应用同目录（删除即恢复默认）。
 STATE_DIR = APP_DIR
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
+
+
+def _saved_lang() -> str:
+    """构建 UI 前从 state.json 读界面语言，避免启动时先中文再切换的闪烁。"""
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            lang = json.load(f).get("lang")
+        return lang if lang in LANGS else "zh"
+    except (OSError, ValueError):
+        return "zh"
 
 # 探针 SWD 速率下拉项：(显示文本, Hz)。pyocd 会话选项 'frequency'。
 RATE_OPTIONS = (
@@ -678,7 +689,11 @@ class ProbeWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QuillaImage - QBOOT 镜像合并 / 烧录")
+        # 语言在构建 UI 前确定：state.json 里存了 lang 就直接用它，
+        # 避免"先按中文构建再整体切换"的启动闪烁。
+        set_lang(_saved_lang())
+        self._ui_texts = []     # [(setter, key)]：语言切换时统一重设的静态文本
+        self._tr_text(self.setWindowTitle, "win_title")
         self.resize(860, 680)
         self.worker = None
         self._probe_worker = None
@@ -689,6 +704,7 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
+        layout.addWidget(self._build_topbar())
         layout.addWidget(self._build_chip_selector())
         layout.addWidget(self._build_tabs(), 1)
         layout.addWidget(self._build_log())
@@ -699,6 +715,48 @@ class MainWindow(QMainWindow):
                  "布局参数仅打包页使用。")
         self._restore_state()
         self._hook_autosave()
+
+    # ------------------------------------------------------------ 界面语言
+    def _build_topbar(self) -> QWidget:
+        """顶栏：右侧语言切换选择框（中文 / English），切换即时生效。"""
+        row = QWidget(); r = QHBoxLayout(row)
+        r.setContentsMargins(0, 0, 0, 0)
+        r.addStretch(1)
+        self.lbl_lang = QLabel(tr("lbl_lang"))
+        self.cmb_lang = QComboBox()
+        for lang in LANGS:
+            self.cmb_lang.addItem(LANG_LABELS[lang], lang)
+        # 先填充并设好当前索引，再连接信号：首个 addItem 会触发
+        # currentIndexChanged，此时日志区 / 探针区还没构建，不能进槽。
+        idx = LANGS.index(get_lang())
+        self.cmb_lang.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_lang.currentIndexChanged.connect(self._on_lang_changed)
+        r.addWidget(self.lbl_lang)
+        r.addWidget(self.cmb_lang)
+        return row
+
+    def _tr_text(self, setter, key: str):
+        """注册静态文本：立即按当前语言设置，语言切换时统一重设。"""
+        self._ui_texts.append((setter, key))
+        setter(tr(key))
+
+    def _retranslate(self):
+        """语言切换后重设所有注册过的静态文本。"""
+        for setter, key in self._ui_texts:
+            setter(tr(key))
+        # 探针下拉当前若显示的是占位项（枚举中 / pyocd 报错 / 空列表），
+        # 按新语言重新枚举一次刷新占位文案；真实探针条目无需处理。
+        if self.cmb_probe.count() and not (self.cmb_probe.currentData() or ""):
+            self._refresh_probes()
+
+    def _on_lang_changed(self, _idx=0):
+        lang = self.cmb_lang.currentData() or "zh"
+        if lang == get_lang():
+            return
+        set_lang(lang)
+        self._retranslate()
+        self._save_state()      # 语言随 state.json 持久化，下次启动直接生效
+        self.log(tr("log_lang_switched") % LANG_LABELS[lang])
 
     # ------------------------------------------------------------ 状态持久化
     _STATE_KEYS = (
@@ -727,6 +785,7 @@ class MainWindow(QMainWindow):
             "auto_slow": self.cb_auto_slow.isChecked(),
             "manual_base": self.cb_manual_base.isChecked(),
             "flash_base": self.ed_flash_base.text().strip(),
+            "lang": get_lang(),
         }
         return state
 
@@ -828,14 +887,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 公共芯片选择区
     def _build_chip_selector(self) -> QWidget:
         """公共区：导入 CMSIS Pack → 选 MCU 型号 → 供两页共用。"""
-        box = QGroupBox("芯片 / CMSIS Pack")
+        box = QGroupBox(tr("grp_chip"))
+        self._tr_text(box.setTitle, "grp_chip")
         form = QFormLayout(box)
 
         self.pack_devices = []          # list[pack_devices.PackDevice]
         self.selected_device = None
 
         self.ed_chip_pack = QLineEdit()
-        btn_pack = QPushButton("导入 Pack…")
+        btn_pack = QPushButton()
+        self._tr_text(btn_pack.setText, "btn_import_pack")
         btn_pack.clicked.connect(self._pick_chip_pack)
         prow = QWidget(); pr = QHBoxLayout(prow)
         pr.setContentsMargins(0, 0, 0, 0)
@@ -848,24 +909,28 @@ class MainWindow(QMainWindow):
         self.cmb_mcu.setEditable(True)
         self.cmb_mcu.setEditText("py32f040xb")
         self.cmb_mcu.currentIndexChanged.connect(self._on_mcu_changed)
-        self.lbl_chip_geo = QLabel("未选择芯片；可从 Pack 导入，或直接输入型号。")
+        self.lbl_chip_geo = QLabel()
+        self._tr_text(self.lbl_chip_geo.setText, "lbl_chip_geo_empty")
 
         # 读型号按钮移到 MCU 型号右方（与型号选择同一行）。
-        self.btn_identity = QPushButton("从目标板读取")
+        self.btn_identity = QPushButton()
+        self._tr_text(self.btn_identity.setText, "btn_identity")
         self.btn_identity.setEnabled(False)   # 枚举出探针后才可用
         self.btn_identity.clicked.connect(self._do_identity)
         mrow = QWidget(); mr = QHBoxLayout(mrow)
         mr.setContentsMargins(0, 0, 0, 0)
         mr.addWidget(self.cmb_mcu, 1); mr.addWidget(self.btn_identity)
 
-        form.addRow("CMSIS Pack:", prow)
-        form.addRow("MCU 型号:", mrow)
+        lbl_pack = QLabel(); self._tr_text(lbl_pack.setText, "lbl_pack")
+        lbl_mcu = QLabel(); self._tr_text(lbl_mcu.setText, "lbl_mcu")
+        form.addRow(lbl_pack, prow)
+        form.addRow(lbl_mcu, mrow)
         form.addRow("", self.lbl_chip_geo)
         return box
 
     def _pick_chip_pack(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 CMSIS Pack (*.pack)", self._start_dir(self.ed_chip_pack),
+            self, tr("fd_pick_pack"), self._start_dir(self.ed_chip_pack),
             "CMSIS Pack (*.pack);;All files (*.*)")
         if not path:
             return
@@ -873,12 +938,11 @@ class MainWindow(QMainWindow):
             from pack_devices import load_pack_devices
             devices = load_pack_devices(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Pack 解析失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_pack_parse_fail"), str(exc))
             self.log("Pack 解析失败：%s" % exc)
             return
         if not devices:
-            QMessageBox.warning(self, "Pack 无可用芯片",
-                                "这个 Pack 里没有带 Flash/RAM 容量定义的芯片。")
+            QMessageBox.warning(self, tr("dlg_no_chips"), tr("msg_no_chips"))
             return
         self.ed_chip_pack.setText(path)
         self.pack_devices = devices
@@ -924,14 +988,14 @@ class MainWindow(QMainWindow):
         part = self.cmb_mcu.currentData() or ""
         self.selected_device = self._mcu_by_part(part)
         if self.selected_device is None:
-            self.lbl_chip_geo.setText("未选择芯片；可从 Pack 导入，或用预设芯片。")
+            self.lbl_chip_geo.setText(tr("lbl_chip_geo_empty"))
             self._apply_pack_flash_base()       # 无 pack 时回退默认地址
             return
         d = self.selected_device
         geo = "Flash %d KiB / RAM %d KiB @ 0x%08X" % (
             d.flash_size // 1024, d.ram_size // 1024, d.ram_start)
         # 型号本身（currentData）就是 pyocd target，不再单独显示一份。
-        self.lbl_chip_geo.setText(geo + " | 已就绪，可打包 / 烧录")
+        self.lbl_chip_geo.setText(tr("geo_ready", geo))
         self._apply_pack_flash_base()           # 地址跟随 pack 的 flash region
         # 打包页布局：按选中的 MCU 几何推导 META/APP 起址仍用默认偏移，
         # image.py 打包时会用 geometry 校验；这里只更新显示。
@@ -990,15 +1054,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 控件构造
     def _build_layout(self) -> QWidget:
         """打包布局：芯片几何来自公共区，这里只留可覆盖的 META/APP 起址。"""
-        box = QGroupBox("镜像布局")
+        box = QGroupBox(tr("grp_layout"))
+        self._tr_text(box.setTitle, "grp_layout")
         form = QFormLayout(box)
 
         self.ed_meta_base = QLineEdit("%08X" % core.DEFAULT_META_BASE)
         self.ed_app_start = QLineEdit("%08X" % core.DEFAULT_APP_START)
+        lbl_meta = QLabel(); self._tr_text(lbl_meta.setText, "lbl_meta")
+        lbl_app = QLabel(); self._tr_text(lbl_app.setText, "lbl_app")
         addr_row = QWidget(); ar = QHBoxLayout(addr_row)
         ar.setContentsMargins(0, 0, 0, 0)
-        ar.addWidget(QLabel("META 起址 0x")); ar.addWidget(self.ed_meta_base)
-        ar.addWidget(QLabel("APP 起址 0x")); ar.addWidget(self.ed_app_start)
+        ar.addWidget(lbl_meta); ar.addWidget(self.ed_meta_base)
+        ar.addWidget(lbl_app); ar.addWidget(self.ed_app_start)
         form.addRow(addr_row)
         return box
 
@@ -1008,8 +1075,10 @@ class MainWindow(QMainWindow):
 
     def _build_tabs(self) -> QWidget:
         tabs = QTabWidget()
-        tabs.addTab(self._build_flash_tab(), "烧录")
-        tabs.addTab(self._build_export_tab(), "打包")
+        tabs.addTab(self._build_flash_tab(), tr("tab_flash"))
+        self._tr_text(lambda t: tabs.setTabText(0, t), "tab_flash")
+        tabs.addTab(self._build_export_tab(), tr("tab_pack"))
+        self._tr_text(lambda t: tabs.setTabText(1, t), "tab_pack")
         return tabs
 
     def _build_flash_tab(self) -> QWidget:
@@ -1018,18 +1087,21 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
 
         self.ed_flash_image = QLineEdit(DEFAULT_OUT)
-        btn_img = QPushButton("浏览...")
+        btn_img = QPushButton()
+        self._tr_text(btn_img.setText, "btn_browse")
         btn_img.clicked.connect(lambda: self._pick_into(
-            self.ed_flash_image, "选择要烧录的整片 bin"))
+            self.ed_flash_image, tr("fd_pick_flash_bin")))
         irow = QWidget(); ir = QHBoxLayout(irow); ir.setContentsMargins(0, 0, 0, 0)
         ir.addWidget(self.ed_flash_image, 1); ir.addWidget(btn_img)
 
         self.cmb_probe = QComboBox()
         self.cmb_probe.setMinimumWidth(320)
-        self.btn_refresh = QPushButton("刷新探针")
+        self.btn_refresh = QPushButton()
+        self._tr_text(self.btn_refresh.setText, "btn_refresh")
         self.btn_refresh.clicked.connect(self._refresh_probes)
         # 显式连接/断开（仅供读型号复用，烧录用独立瞬时会话）。
-        self.btn_conn = QPushButton("连接探针")
+        self.btn_conn = QPushButton()
+        self._tr_text(self.btn_conn.setText, "btn_conn")
         self.btn_conn.setEnabled(False)       # 枚举出探针后才可用
         self.btn_conn.clicked.connect(self._toggle_conn)
         row = QWidget(); r = QHBoxLayout(row); r.setContentsMargins(0, 0, 0, 0)
@@ -1042,40 +1114,52 @@ class MainWindow(QMainWindow):
             self.cmb_rate.addItem(label, hz)
         self.cmb_rate.setCurrentIndex(RATE_DEFAULT_INDEX)
         self.cmb_rate.currentIndexChanged.connect(self._on_rate_changed)
-        self.cb_auto_slow = QCheckBox("失败时自动降速")
+        self.cb_auto_slow = QCheckBox()
+        self._tr_text(self.cb_auto_slow.setText, "cb_auto_slow")
         self.cb_auto_slow.setChecked(True)
         self.cb_auto_slow.toggled.connect(self._save_state)
         rate_row = QWidget(); rr = QHBoxLayout(rate_row)
         rr.setContentsMargins(0, 0, 0, 0)
-        rr.addWidget(QLabel("探针速率:")); rr.addWidget(self.cmb_rate)
+        lbl_rate_hz = QLabel(); self._tr_text(lbl_rate_hz.setText, "lbl_rate_hz")
+        rr.addWidget(lbl_rate_hz); rr.addWidget(self.cmb_rate)
         rr.addWidget(self.cb_auto_slow); rr.addStretch(1)
 
         # 烧录起始地址：默认从 CMSIS Pack 的 flash region 取，只读；
         # 勾选"手动设置"后可直接编辑。
         self.ed_flash_base = QLineEdit("%08X" % core.FLASH_BASE)
         self.ed_flash_base.setReadOnly(True)
-        self.cb_manual_base = QCheckBox("手动设置")
+        self.cb_manual_base = QCheckBox()
+        self._tr_text(self.cb_manual_base.setText, "cb_manual_base")
         self.cb_manual_base.toggled.connect(
             lambda on: self.ed_flash_base.setReadOnly(not on))
         base_row = QWidget(); br2 = QHBoxLayout(base_row)
         br2.setContentsMargins(0, 0, 0, 0)
-        br2.addWidget(QLabel("烧录地址 0x")); br2.addWidget(self.ed_flash_base)
+        lbl_base = QLabel(); self._tr_text(lbl_base.setText, "lbl_flash_base")
+        br2.addWidget(lbl_base); br2.addWidget(self.ed_flash_base)
         br2.addWidget(self.cb_manual_base); br2.addStretch(1)
 
-        self.cb_erase = QCheckBox("烧录前整片擦除")
+        self.cb_erase = QCheckBox()
+        self._tr_text(self.cb_erase.setText, "cb_erase")
         self.cb_erase.setChecked(True)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.btn_verify_img = QPushButton("校验所选整片 bin")
+        self.btn_verify_img = QPushButton()
+        self._tr_text(self.btn_verify_img.setText, "btn_verify_img")
         self.btn_verify_img.clicked.connect(self._do_verify_file)
-        self.btn_flash = QPushButton("烧录整片 bin")
+        self.btn_flash = QPushButton()
+        self._tr_text(self.btn_flash.setText, "btn_flash")
         self.btn_flash.clicked.connect(self._do_flash)
 
-        form.addRow("整片 bin 文件:", irow)
-        form.addRow("调试探针:", row)
-        form.addRow("速率:", rate_row)
-        form.addRow("烧录地址:", base_row)
+        lbl_img = QLabel(); self._tr_text(lbl_img.setText, "lbl_flash_image")
+        lbl_probe = QLabel(); self._tr_text(lbl_probe.setText, "lbl_probe")
+        lbl_rate = QLabel(); self._tr_text(lbl_rate.setText, "lbl_rate")
+        lbl_base_form = QLabel()
+        self._tr_text(lbl_base_form.setText, "lbl_flash_base_form")
+        form.addRow(lbl_img, irow)
+        form.addRow(lbl_probe, row)
+        form.addRow(lbl_rate, rate_row)
+        form.addRow(lbl_base_form, base_row)
         v.addLayout(form)
         v.addWidget(self.cb_erase)
         v.addWidget(self.progress)
@@ -1096,7 +1180,8 @@ class MainWindow(QMainWindow):
         v.addWidget(self._build_layout())
 
         # ---- 固件镜像 ----
-        box_in = QGroupBox("固件镜像")
+        box_in = QGroupBox(tr("grp_fw"))
+        self._tr_text(box_in.setTitle, "grp_fw")
         form = QFormLayout(box_in)
 
         self.ed_boot = QLineEdit()
@@ -1106,16 +1191,15 @@ class MainWindow(QMainWindow):
         self.spin_version.setRange(0, 0x7FFFFFFF)
         self.spin_version.setValue(0)
 
-        b1 = QPushButton("浏览...")
-        b1.clicked.connect(lambda: self._pick_into(self.ed_boot,
-                                                   "选择 QBOOT 镜像（.bin）"))
-        b2 = QPushButton("浏览...")
-        b2.clicked.connect(lambda: self._pick_into(self.ed_app,
-                                                   "选择量产 APP .bin"))
-        b3 = QPushButton("浏览...")
+        b1 = QPushButton(); self._tr_text(b1.setText, "btn_browse")
+        b1.clicked.connect(lambda: self._pick_into(
+            self.ed_boot, tr("fd_pick_boot")))
+        b2 = QPushButton(); self._tr_text(b2.setText, "btn_browse")
+        b2.clicked.connect(lambda: self._pick_into(
+            self.ed_app, tr("fd_pick_app")))
+        b3 = QPushButton(); self._tr_text(b3.setText, "btn_browse")
         b3.clicked.connect(lambda: self._pick_into(
-            self.ed_key, "选择 Ed25519 私钥 private.hex（SEALED/SEC 必填）",
-            "*.hex"))
+            self.ed_key, tr("fd_pick_key"), "*.hex"))
 
         row1 = QWidget(); r1 = QHBoxLayout(row1); r1.setContentsMargins(0, 0, 0, 0)
         r1.addWidget(self.ed_boot, 1); r1.addWidget(b1)
@@ -1124,27 +1208,36 @@ class MainWindow(QMainWindow):
         row3 = QWidget(); r3 = QHBoxLayout(row3); r3.setContentsMargins(0, 0, 0, 0)
         r3.addWidget(self.ed_key, 1); r3.addWidget(b3)
 
-        self.cb_seal = QCheckBox("SEALED 变体预置 seal（出厂首启免 ~20 s 验签）")
+        self.cb_seal = QCheckBox()
+        self._tr_text(self.cb_seal.setText, "cb_seal")
         self.cb_seal.setChecked(True)
 
-        form.addRow("QBOOT 镜像:", row1)
-        form.addRow("APP 镜像:", row2)
-        form.addRow("Ed25519 私钥 (SEALED/SEC 必填):", row3)
-        form.addRow("manifest 版本 (仅 CHECK):", self.spin_version)
+        lbl_boot = QLabel(); self._tr_text(lbl_boot.setText, "lbl_boot")
+        lbl_app_img = QLabel(); self._tr_text(lbl_app_img.setText, "lbl_app_img")
+        lbl_key = QLabel(); self._tr_text(lbl_key.setText, "lbl_key")
+        lbl_ver = QLabel(); self._tr_text(lbl_ver.setText, "lbl_version")
+        form.addRow(lbl_boot, row1)
+        form.addRow(lbl_app_img, row2)
+        form.addRow(lbl_key, row3)
+        form.addRow(lbl_ver, self.spin_version)
         form.addRow("", self.cb_seal)
 
-        btn = QPushButton("解析并预览（load 后显示 CRC32）")
+        btn = QPushButton()
+        self._tr_text(btn.setText, "btn_preview")
         btn.clicked.connect(self._preview)
         form.addRow("", btn)
         v.addWidget(box_in)
 
         # 导出路径不在此页设置：点导出时弹保存框，默认定位烧录页的整片 bin
         # 路径，保存后自动回填烧录页（见 _do_export / _do_meta_only）。
-        btn_export = QPushButton("导出 boot + app + manifest 单 bin")
+        btn_export = QPushButton()
+        self._tr_text(btn_export.setText, "btn_export")
         btn_export.clicked.connect(self._do_export)
-        btn_meta_only = QPushButton("仅导出 256 B META 记录")
+        btn_meta_only = QPushButton()
+        self._tr_text(btn_meta_only.setText, "btn_meta_only")
         btn_meta_only.clicked.connect(self._do_meta_only)
-        btn_verify = QPushButton("校验已有整片 bin")
+        btn_verify = QPushButton()
+        self._tr_text(btn_verify.setText, "btn_verify")
         btn_verify.clicked.connect(self._do_verify)
 
         btnrow = QWidget(); br = QHBoxLayout(btnrow)
@@ -1156,7 +1249,8 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_log(self) -> QWidget:
-        box = QGroupBox("日志")
+        box = QGroupBox(tr("grp_log"))
+        self._tr_text(box.setTitle, "grp_log")
         v = QVBoxLayout(box)
         row = QWidget(); r = QHBoxLayout(row)
         r.setContentsMargins(0, 0, 0, 0)
@@ -1164,10 +1258,12 @@ class MainWindow(QMainWindow):
         self.txt_log = QPlainTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setMaximumBlockCount(500)
-        btn_copy = QPushButton("复制日志")
+        btn_copy = QPushButton()
+        self._tr_text(btn_copy.setText, "btn_copy_log")
         btn_copy.clicked.connect(
             lambda: QApplication.clipboard().setText(self.txt_log.toPlainText()))
-        btn_clear = QPushButton("清除日志")
+        btn_clear = QPushButton()
+        self._tr_text(btn_clear.setText, "btn_clear_log")
         btn_clear.clicked.connect(self.txt_log.clear)
         r.addWidget(btn_copy)
         r.addWidget(btn_clear)
@@ -1278,7 +1374,7 @@ class MainWindow(QMainWindow):
                          % (meta_out, info["meta_base"]))
             return True
         except (core.ImageError, OSError) as exc:
-            QMessageBox.critical(self, "生成失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_gen_fail"), str(exc))
             self.log("生成失败：%s" % exc)
             return False
 
@@ -1293,7 +1389,8 @@ class MainWindow(QMainWindow):
             boot = core._read_file(self.ed_boot.text().strip())
             app = core._read_file(self.ed_app.text().strip())
         except OSError as exc:
-            QMessageBox.critical(self, "解析失败", "镜像文件读取失败：%s" % exc)
+            QMessageBox.critical(self, tr("dlg_parse_fail"),
+                                 tr("msg_read_image_fail", str(exc)))
             self.log("解析失败：%s" % exc)
             return
         try:
@@ -1301,7 +1398,7 @@ class MainWindow(QMainWindow):
             layout = core.resolve_layout(meta_base, app_start, self._chip(),
                                          self._chip_geometry())
         except core.ImageError as exc:
-            QMessageBox.critical(self, "解析失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_parse_fail"), str(exc))
             self.log("解析失败：%s" % exc)
             return
 
@@ -1313,7 +1410,7 @@ class MainWindow(QMainWindow):
                 app, layout["app_start"], layout["app_size"], self._chip(),
                 self._chip_geometry())
         except core.ImageError as exc:
-            QMessageBox.critical(self, "解析失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_parse_fail"), str(exc))
             self.log("解析失败：%s" % exc)
             return
 
@@ -1342,7 +1439,7 @@ class MainWindow(QMainWindow):
         if self._probe_worker is not None and self._probe_worker.isRunning():
             return                                    # 正在枚举，忽略重入
         self.cmb_probe.clear()
-        self.cmb_probe.addItem("正在枚举探针 ...", "")
+        self.cmb_probe.addItem(tr("probe_enum"), "")
         self.btn_identity.setEnabled(False)
         self._probe_worker = ProbeWorker()
         self._probe_worker.done.connect(self._probes_done)
@@ -1351,14 +1448,14 @@ class MainWindow(QMainWindow):
     def _probes_done(self, probes, error):
         self.cmb_probe.clear()
         if error:
-            self.cmb_probe.addItem("（pyocd 不可用：%s）" % error, "")
+            self.cmb_probe.addItem(tr("probe_pyocd_err", error), "")
             self.log("[提示] pyocd 未安装或加载失败（%s），打包页可正常使用，"
                      "烧录页需先 pip install pyocd" % error)
             return
         if not probes:
             # 枚举为空不影响烧录：probe_id 为空时 FlashWorker 会用
             # return_first=True 让 pyocd 自动取第一个探针。
-            self.cmb_probe.addItem("（列表为空；烧录时自动取第一个探针）", "")
+            self.cmb_probe.addItem(tr("probe_empty"), "")
             self.btn_conn.setEnabled(False)
             return
         for p in probes:
@@ -1378,17 +1475,16 @@ class MainWindow(QMainWindow):
     def _connect_probe(self):
         """显式打开并持有探针 session（connect_mode=attach，不 halt 目标）。"""
         if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(self, "忙", "上一次操作还在进行中。")
+            QMessageBox.information(self, tr("dlg_busy"), tr("msg_busy"))
             return
         probe_id = self.cmb_probe.currentData() or ""
         if not probe_id:
-            QMessageBox.warning(self, "未选择探针",
-                                "请先刷新并选择一个调试探针。")
+            QMessageBox.warning(self, tr("dlg_no_probe"), tr("msg_no_probe"))
             return
         if not self._target_ready():
             return
         self.btn_conn.setEnabled(False)
-        self.btn_conn.setText("连接中 ...")
+        self.btn_conn.setText(tr("btn_connecting"))
         self.log("连接探针（attach 模式，不打断目标运行）...")
         self.conn_worker = ConnWorker(
             probe_id, self._mcu_target(), self.ed_chip_pack.text().strip(),
@@ -1400,9 +1496,10 @@ class MainWindow(QMainWindow):
 
     def _connect_done(self, session, error):
         if session is None or error:
-            self.btn_conn.setText("连接探针")
+            self.btn_conn.setText(tr("btn_conn"))
             self.btn_conn.setEnabled(True)
-            QMessageBox.critical(self, "连接失败", error or "未知错误")
+            QMessageBox.critical(self, tr("dlg_conn_fail"),
+                                 error or tr("dlg_unknown_err"))
             self.log("探针连接失败：%s" % error)
             # 探针可能已从总线消失（固件挂死重枚举），刷新一次列表。
             self._refresh_probes()
@@ -1417,7 +1514,7 @@ class MainWindow(QMainWindow):
         if self._held_session is None:
             return
         self.btn_conn.setEnabled(False)
-        self.btn_conn.setText("断开中 ...")
+        self.btn_conn.setText(tr("btn_disconnecting"))
         self.disc_worker = DiscWorker(self._held_session)
         self.disc_worker.done.connect(self._disconnect_done)
         self.disc_worker.start()
@@ -1438,7 +1535,7 @@ class MainWindow(QMainWindow):
             self._start_flash()
 
     def _set_conn_state(self, connected: bool):
-        self.btn_conn.setText("断开探针" if connected else "连接探针")
+        self.btn_conn.setText(tr("btn_disc") if connected else tr("btn_conn"))
         self.btn_conn.setEnabled(True)
         # 连接期间探针选择固定，不许换；刷新也无意义（枚举到的还是同一台）。
         self.cmb_probe.setEnabled(not connected)
@@ -1457,24 +1554,20 @@ class MainWindow(QMainWindow):
         target = self._mcu_target()
         pack = self.ed_chip_pack.text().strip()
         if not target:
-            QMessageBox.warning(self, "目标型号未填",
-                                "请在公共区选择 MCU 型号或手输 pyocd 目标。")
+            QMessageBox.warning(self, tr("dlg_target_missing"),
+                                tr("msg_target_missing"))
             return False
         if pack:
             return True
         mods, err = _ensure_pyocd()
         if mods is None:
-            QMessageBox.warning(self, "pyocd 不可用",
-                                "未检测到 pyocd（%s），无法校验目标型号。\n"
-                                "请先执行：pip install pyocd" % err)
+            QMessageBox.warning(self, tr("dlg_pyocd_missing"),
+                                tr("msg_pyocd_missing", err))
             return False
         from pyocd.target import TARGET
         if target not in TARGET:
             QMessageBox.warning(
-                self, "需要 CMSIS Pack",
-                "目标 %r 不是 pyocd 内建型号。\n"
-                "请在公共区导入对应 CMSIS Pack，或手输一个内建型号\n"
-                "（pyocd list --targets 可查看）。" % target)
+                self, tr("dlg_pack_needed"), tr("msg_pack_needed", target))
             return False
         return True
 
@@ -1486,21 +1579,20 @@ class MainWindow(QMainWindow):
         不作为硬件型号依据（见 CR-0085 的边界说明）。
         """
         if self.worker is not None and getattr(self.worker, "isRunning", lambda: False)():
-            QMessageBox.information(self, "忙", "上一次操作还在进行中。")
+            QMessageBox.information(self, tr("dlg_busy"), tr("msg_busy"))
             return
         if self.match_worker is not None and self.match_worker.isRunning():
-            QMessageBox.information(self, "忙", "配对进行中，请稍候。")
+            QMessageBox.information(self, tr("dlg_busy"), tr("msg_busy_match"))
             return
         if not self.pack_devices:
-            QMessageBox.warning(self, "未导入 Pack",
-                                "请先导入 CMSIS Pack，再按型号队列配对。")
+            QMessageBox.warning(self, tr("dlg_no_pack"), tr("msg_no_pack"))
             return
         probe_id = self.cmb_probe.currentData() or ""
         self.btn_identity.setEnabled(False)
         total = len(self.pack_devices)
         self.match_progress = QProgressDialog(
-            "正在配对 MCU 型号 ...", "取消", 0, total, self)
-        self.match_progress.setWindowTitle("MCU 型号配对")
+            tr("pd_match"), tr("pd_cancel"), 0, total, self)
+        self.match_progress.setWindowTitle(tr("pd_match_title"))
         self.match_progress.setMinimumDuration(0)
         self.match_progress.setValue(0)
         self.match_worker = MatchWorker(
@@ -1515,7 +1607,7 @@ class MainWindow(QMainWindow):
     def _match_progress(self, index: int, total: int, model: str):
         if self.match_progress is not None:
             self.match_progress.setLabelText(
-                "正在配对 %d/%d：%s" % (index, total, model))
+                tr("pd_match_progress", index, total, model))
             self.match_progress.setValue(index)
 
     def _match_done(self, dev, error: str):
@@ -1528,7 +1620,7 @@ class MainWindow(QMainWindow):
         if dev is None:
             if error == "已取消配对":
                 return
-            QMessageBox.warning(self, "MCU 型号", "未匹配到正确MCU型号")
+            QMessageBox.warning(self, tr("dlg_mcu_model"), tr("msg_no_match"))
             self.log("未匹配到正确MCU型号（已尝试 %d 个型号）"
                      % len(self.pack_devices))
             self._refresh_probes()
@@ -1556,18 +1648,15 @@ class MainWindow(QMainWindow):
     def _identity_done(self, ident, error):
         self.btn_identity.setEnabled(True)
         if error or ident is None:
-            target = self._mcu_target() or "(未选型号)"
-            hint = ("\n\n目标型号：%s" % target)
+            target = self._mcu_target() or tr("no_model_selected")
+            hint = tr("hint_target", target)
             # AssertionError 无消息（pyocd 对部分 pack 芯片的兼容缺陷，
             # 如 GD32F50x pack 的 128KB 型号），堆栈已写入日志。
             if error.startswith("AssertionError"):
-                hint += ("\n\npyocd 在创建该型号的 target 时断言失败"
-                         "（pack 数据兼容缺陷，完整堆栈见日志）。"
-                         "请换用同系列其它容量型号。")
-            hint += ("\n\n探针可能已掉线（assert 发生在连接中途，"
-                     "半初始化的会话未能干净释放）。请刷新探针列表；"
-                     "若列表为空需重新插拔 USB。")
-            QMessageBox.critical(self, "读取失败", (error or "未知错误") + hint)
+                hint += tr("hint_assert")
+            hint += tr("hint_offline")
+            QMessageBox.critical(self, tr("dlg_read_fail"),
+                                 (error or tr("dlg_unknown_err")) + hint)
             self.log("读取 MCU 型号失败（target=%s）：%s" % (target, error))
             self._refresh_probes()
             return
@@ -1585,31 +1674,31 @@ class MainWindow(QMainWindow):
             else:
                 self.cmb_mcu.setEditText(dev.part_number.lower())
             compat = self._compatible_models(dev)
-            msg = "配对成功：%s" % dev.part_number
+            msg = tr("msg_match_ok", dev.part_number)
             if compat:
-                msg += "\n兼容烧录型号：%s" % "、".join(compat)
-            QMessageBox.information(self, "MCU 型号", msg)
+                msg += "\n" + tr("msg_compat", "、".join(compat))
+            QMessageBox.information(self, tr("dlg_mcu_model"), msg)
             self.log(msg.replace("\n", "；"))
         else:
             # 无回值或在 pack 中匹配不到（0 个 / 多个）：明确提示未适配。
-            msg = "未适配：%s" % (read_model or "未读到型号")
+            msg = tr("msg_not_adapted", read_model or tr("raw_no_model"))
             if not read_model:
-                msg += "（仅读到原始 ID，不据此猜型号）"
-            QMessageBox.warning(self, "MCU 型号", msg)
+                msg += " " + tr("msg_raw_id")
+            QMessageBox.warning(self, tr("dlg_mcu_model"), msg)
             self.log(msg + "\n" + ident.summary())
 
     def _do_flash(self):
         mods, err = _ensure_pyocd()
         if mods is None:
-            QMessageBox.critical(
-                self, "缺少依赖",
-                "未检测到 pyocd，请先执行：pip install pyocd\n\n%s" % err)
+            QMessageBox.critical(self, tr("dlg_dep_missing"),
+                                 tr("msg_dep_missing", err))
             return
         if self.worker is not None and self.worker.isRunning():
             return
         image_path = self.ed_flash_image.text().strip()
         if not image_path:
-            QMessageBox.critical(self, "烧录失败", "请先选择要烧录的整片 bin")
+            QMessageBox.critical(self, tr("dlg_flash_fail"),
+                                 tr("msg_pick_flash_bin"))
             return
         # 烧前校验（不生成 manifest）：按布局起址复核 bin
         try:
@@ -1623,9 +1712,8 @@ class MainWindow(QMainWindow):
             self._show_info(info)
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(
-                self, "烧前校验失败",
-                "%s\n\n请确认所选 bin 与布局起址一致，"
-                "或在 ② 打包页重新导出。" % exc)
+                self, tr("dlg_verify_pre_fail"),
+                tr("msg_verify_pre_fail", str(exc)))
             self.log("烧前校验失败：%s" % exc)
             return
         if not self._target_ready():
@@ -1667,27 +1755,28 @@ class MainWindow(QMainWindow):
         self.btn_flash.setEnabled(True)
         if ok:
             self.progress.setValue(100)
-            QMessageBox.information(self, "完成", msg)
+            QMessageBox.information(self, tr("dlg_done"), msg)
         else:
-            QMessageBox.critical(self, "烧录失败", msg)
+            QMessageBox.critical(self, tr("dlg_flash_fail"), msg)
         # 烧录用独立瞬时会话，用完即关；持有会话只服务读型号，不受影响。
 
     def _do_export(self):
         # 默认定位烧录页的整片 bin 路径；用户确认后回填烧录页并生成。
         start = self.ed_flash_image.text().strip() or DEFAULT_OUT
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出整片 bin", start, "*.bin")
+            self, tr("fd_export_bin"), start, "*.bin")
         if not path:
             return
         if self._build(path, ""):
             self.ed_flash_image.setText(path)     # 自动更新烧录页路径
-            QMessageBox.information(self, "完成", "已导出：\n%s" % path)
+            QMessageBox.information(self, tr("dlg_done"),
+                                    tr("msg_export_ok", path))
 
     def _do_meta_only(self):
         start = os.path.join(self._start_dir(self.ed_flash_image),
                              "meta_record.bin")
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出 META 记录", start, "*.bin")
+            self, tr("fd_export_meta"), start, "*.bin")
         if not path:
             return
         try:
@@ -1702,13 +1791,14 @@ class MainWindow(QMainWindow):
             self.log("已导出 META 记录：%s" % path)
             self._show_info(info)
         except (core.ImageError, OSError) as exc:
-            QMessageBox.critical(self, "导出失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_export_fail"), str(exc))
 
     def _do_verify_file(self):
         """① 烧录页：按布局起址校验所选整片 bin。"""
         path = self.ed_flash_image.text().strip()
         if not path:
-            QMessageBox.critical(self, "校验失败", "请先选择要校验的整片 bin")
+            QMessageBox.critical(self, tr("dlg_verify_fail"),
+                                 tr("msg_pick_verify_bin"))
             return
         try:
             meta_base, app_start = self._layout_addrs()
@@ -1721,14 +1811,15 @@ class MainWindow(QMainWindow):
             self._show_info(info)
             self.log("  APP MSP 0x%08X / reset 0x%08X"
                      % (info["app_sp"], info["app_reset"]))
-            QMessageBox.information(self, "完成", "校验通过：\n%s" % path)
+            QMessageBox.information(self, tr("dlg_done"),
+                                    tr("msg_verify_ok", path))
         except (core.ImageError, OSError) as exc:
-            QMessageBox.critical(self, "校验失败", str(exc))
+            QMessageBox.critical(self, tr("dlg_verify_fail"), str(exc))
             self.log("校验失败：%s" % exc)
 
     def _do_verify(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择要校验的整片 bin", self._start_dir(self.ed_flash_image),
+            self, tr("fd_pick_verify"), self._start_dir(self.ed_flash_image),
             "*.bin")
         if not path:
             return
@@ -1743,7 +1834,8 @@ class MainWindow(QMainWindow):
             self._show_info(info)
             self.log("  APP MSP 0x%08X / reset 0x%08X"
                      % (info["app_sp"], info["app_reset"]))
-            QMessageBox.information(self, "完成", "校验通过：\n%s" % path)
+            QMessageBox.information(self, tr("dlg_done"),
+                                    tr("msg_verify_ok", path))
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(self, "校验失败", str(exc))
             self.log("校验失败：%s" % exc)
@@ -1759,8 +1851,7 @@ def main() -> int:
     # 避免双击 exe 后几秒白屏让人以为没点开。
     splash = QSplashScreen()
     splash.setFixedSize(340, 140)
-    splash.showMessage("正在启动 QuillaImage ...",
-                       Qt.AlignCenter, Qt.darkGray)
+    splash.showMessage(tr("splash_msg"), Qt.AlignCenter, Qt.darkGray)
     splash.show()
     app.processEvents()
     win = MainWindow()

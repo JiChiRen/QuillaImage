@@ -21,7 +21,7 @@ Usage::
 
     python tools/build_exe.py
 
-Produces ``dist/quilla-image/quilla-image.exe`` plus its Qt / pyocd runtime
+Produces ``dist/QuillaImage/QuillaImage.exe`` plus its Qt / pyocd runtime
 files in the same folder. Onedir avoids the per-launch extraction of a
 one-file archive, so startup is much faster at the cost of a folder instead
 of a single file. The core image packer remains usable from source with no
@@ -130,12 +130,12 @@ def main(argv=None) -> int:
     with open(entry, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(ENTRY_SOURCE)
 
-    exe = "quilla-image" + (".exe" if os.name == "nt" else "")
-    app_dir = os.path.join(DIST, "quilla-image")
+    exe = "QuillaImage" + (".exe" if os.name == "nt" else "")
+    app_dir = os.path.join(DIST, "QuillaImage")
     args = [
         sys.executable, "-m", "PyInstaller",
         entry,
-        "--name", "quilla-image",
+        "--name", "QuillaImage",
         "--onedir",
         # GUI app: use the Windows GUI subsystem, otherwise a console window
         # flashes up before Qt shows the main window.
@@ -213,7 +213,7 @@ def main(argv=None) -> int:
         sep = ";" if os.name == "nt" else ":"
         args += ["--add-data", "%s%spackage" % (sign_mod, sep)]
 
-    print("[build] %s -> %s" % ("quilla-image", os.path.join(app_dir, exe)))
+    print("[build] %s -> %s" % ("QuillaImage", os.path.join(app_dir, exe)))
     # Remove stale one-file artifacts and the previous onedir tree so the
     # output directory contains exactly one build.
     stale = os.path.join(DIST, exe)
@@ -247,7 +247,7 @@ def main(argv=None) -> int:
                 for dp, _, fs in os.walk(app_dir) for f in fs)
     print("[build] %-20s exe %8.1f KiB / folder %8.1f KiB"
           % (exe, os.path.getsize(out) / 1024.0, total / 1024.0))
-    print("[build] Qt LGPL/GPL license texts copied to dist/quilla-image/licenses/")
+    print("[build] Qt LGPL/GPL license texts copied to dist/QuillaImage/licenses/")
     return 0
 
 

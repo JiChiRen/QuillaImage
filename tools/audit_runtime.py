@@ -10,7 +10,7 @@
 
 Method (runtime module enumeration)::
 
-    1. Start dist/quilla-image/quilla-image.exe.
+    1. Start dist/QuillaImage/QuillaImage.exe.
     2. Exercise every feature (pack, verify, flash-page load, key tools).
     3. Run this script: it snapshots the live process's loaded modules and
        compares them against every file in the app directory, reporting
@@ -39,8 +39,8 @@ from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-APP_DIR = os.path.join(ROOT, "dist", "quilla-image")
-EXE = "quilla-image.exe"
+APP_DIR = os.path.join(ROOT, "dist", "QuillaImage")
+EXE = "QuillaImage.exe"
 
 # Win32 Toolhelp32 snapshot API
 TH32CS_SNAPMODULE = 0x00000008

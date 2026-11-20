@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from i18n import tr
+
 
 # Common DBGMCU_IDCODE addresses. Keyed by core family hint from DP IDCODE.
 # These are well-known locations, but NOT guaranteed for every part: reads
@@ -56,8 +58,8 @@ class McuIdentity:
     def summary(self) -> str:
         lines = []
         if self.part_number:
-            lines.append(("目标定义型号 : %s %s" % (
-                self.vendor, self.part_number)).strip())
+            lines.append((tr("id_target_model", self.vendor,
+                             self.part_number)).strip())
         if self.dp_idcode:
             lines.append("DP IDCODE : 0x%08X%s" % (
                 self.dp_idcode,
@@ -66,10 +68,10 @@ class McuIdentity:
             for addr, val in self.dbgmcu.items():
                 lines.append("DBGMCU @%s : 0x%08X" % (addr, val))
         else:
-            lines.append("DBGMCU 寄存器：读取失败或该芯片不支持上述地址")
+            lines.append(tr("id_dbgmcu_fail"))
         if self.notes:
             lines.append(self.notes)
-        return "\n".join(lines) if lines else "未读到任何芯片标识"
+        return "\n".join(lines) if lines else tr("id_no_ident")
 
 
 def read_identity(session) -> McuIdentity:
@@ -95,7 +97,7 @@ def read_identity(session) -> McuIdentity:
         ident.dp_idcode = int(target.dp.dpidr.idr)
         ident.core_name = DP_CORE_NAMES.get(ident.dp_idcode & 0xFFFFFFFF, "")
     except Exception as exc:
-        ident.notes = "DP IDCODE 读取失败：%s" % exc
+        ident.notes = tr("id_dp_fail", exc)
 
     for addr in DBGMCU_ADDRESSES:
         try:

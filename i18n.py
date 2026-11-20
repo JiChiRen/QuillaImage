@@ -286,6 +286,335 @@ _STRINGS = {
         "zh": "选择要校验的整片 bin",
         "en": "Select the full-image bin to verify",
     },
+
+    # ---- 日志 / 后台线程消息 ----
+    "log_startup": {
+        "zh": "烧录地址默认取自 CMSIS Pack 的 flash 起始（可勾选手动设置）；"
+              "布局参数仅打包页使用。",
+        "en": "Flash address defaults to the Pack's flash start (toggle "
+              "Manual to override); layout parameters apply to packing only.",
+    },
+    "log_state_read_fail": {
+        "zh": "[提示] 状态文件读取失败（%s），使用默认值。",
+        "en": "[hint] Failed to read state file (%s); using defaults.",
+    },
+    "log_restore_pack_fail": {
+        "zh": "[提示] 恢复 CMSIS Pack 失败（%s）。",
+        "en": "[hint] Failed to restore CMSIS Pack (%s).",
+    },
+    "log_restored": {
+        "zh": "[提示] 已从 %s 恢复上次的路径与选项。",
+        "en": "[hint] Restored last paths and options from %s.",
+    },
+    "log_pack_parse_fail": {
+        "zh": "Pack 解析失败：%s",
+        "en": "Pack parse failed: %s",
+    },
+    "log_model_switched": {
+        "zh": "[提示] 原型号 %s 不在此 Pack 中，已切换到 %s；"
+              "请确认后再读取型号 / 烧录。",
+        "en": "[hint] Previous model %s is not in this Pack; switched to "
+              "%s. Confirm before reading the model / flashing.",
+    },
+    "log_current_model": {
+        "zh": "当前选中型号：%s",
+        "en": "Selected model: %s",
+    },
+    "log_pack_imported": {
+        "zh": "Pack 已导入：%s（%d 个芯片）",
+        "en": "Pack imported: %s (%d chips)",
+    },
+    "log_rate_set": {
+        "zh": "探针速率已设为 %s（下次连接 / 烧录生效）",
+        "en": "Probe rate set to %s (applies on next connect / flash)",
+    },
+    "log_stack_prefix": {
+        "zh": "[堆栈]\n",
+        "en": "[traceback]\n",
+    },
+    "log_pyocd_hint": {
+        "zh": "[提示] pyocd 未安装或加载失败（%s），打包页可正常使用，"
+              "烧录页需先 pip install pyocd",
+        "en": "[hint] pyocd not installed or failed to load (%s). The Pack "
+              "page works; the Flash page needs: pip install pyocd",
+    },
+    "log_connecting_attach": {
+        "zh": "连接探针（attach 模式，不打断目标运行）...",
+        "en": "Connecting probe (attach mode, target keeps running)...",
+    },
+    "log_connect_fail": {
+        "zh": "探针连接失败：%s",
+        "en": "Probe connect failed: %s",
+    },
+    "log_held_session": {
+        "zh": "探针已连接并持有；读型号将复用本次连接，"
+              "烧录使用独立会话（点击烧录时会自动断开本连接）。",
+        "en": "Probe connected and held. Model reads reuse this session; "
+              "flashing opens its own (held connection auto-disconnects "
+              "when you click Flash).",
+    },
+    "log_disconnected": {
+        "zh": "探针已断开。",
+        "en": "Probe disconnected.",
+    },
+    "log_disconnect_err": {
+        "zh": "断开时出错（不影响重新连接）：%s",
+        "en": "Error while disconnecting (reconnect unaffected): %s",
+    },
+    "log_disconnect_before_flash": {
+        "zh": "烧录前先断开 attach 持有会话，随后用独立会话烧录 ...",
+        "en": "Disconnecting the held attach session before flashing; "
+              "flashing will use its own session...",
+    },
+    "log_preflash_ok": {
+        "zh": "烧前校验通过：%s",
+        "en": "Pre-flash verify passed: %s",
+    },
+    "log_preflash_fail": {
+        "zh": "烧前校验失败：%s",
+        "en": "Pre-flash verify failed: %s",
+    },
+    "log_verify_ok": {
+        "zh": "校验通过：%s",
+        "en": "Verify passed: %s",
+    },
+    "log_verify_fail": {
+        "zh": "校验失败：%s",
+        "en": "Verify failed: %s",
+    },
+    "log_gen_fail": {
+        "zh": "生成失败：%s",
+        "en": "Generation failed: %s",
+    },
+    "log_generated": {
+        "zh": "已生成整片 bin：%s (%d B)",
+        "en": "Full-image bin generated: %s (%d B)",
+    },
+    "log_meta_exported": {
+        "zh": "  已导出 META 记录：%s (256 B, 0x%08X)",
+        "en": "  META record exported: %s (256 B, 0x%08X)",
+    },
+    "log_meta_only_exported": {
+        "zh": "已导出 META 记录：%s",
+        "en": "META record exported: %s",
+    },
+    "log_parse_ok": {
+        "zh": "解析通过（未写文件）",
+        "en": "Parse passed (nothing written)",
+    },
+    "log_parse_fail": {
+        "zh": "解析失败：%s",
+        "en": "Parse failed: %s",
+    },
+    "log_read_fail": {
+        "zh": "读取 MCU 型号失败（target=%s）：%s",
+        "en": "Failed to read MCU model (target=%s): %s",
+    },
+    "log_match_fail": {
+        "zh": "配对失败：%s",
+        "en": "Matching failed: %s",
+    },
+    "log_no_match_n": {
+        "zh": "未匹配到正确MCU型号（已尝试 %d 个型号）",
+        "en": "No matching MCU model found (%d models tried)",
+    },
+    "msg_yes": {"zh": "是", "en": "yes"},
+    "msg_no": {"zh": "否", "en": "no"},
+    "match_cancelled": {"zh": "已取消配对", "en": "matching cancelled"},
+
+    # FlashWorker
+    "log_pyocd_missing_short": {
+        "zh": "未检测到 pyocd：%s",
+        "en": "pyocd not found: %s",
+    },
+    "log_no_probe": {"zh": "未找到可用探针", "en": "No usable probe found"},
+    "log_no_probe_detail": {
+        "zh": "未找到可用探针（检查连接 / 驱动 / unique_id）",
+        "en": "No usable probe found (check cable / driver / unique_id)",
+    },
+    "log_attempt": {
+        "zh": "第 %d 次尝试：以 %s 速率连接探针",
+        "en": "Attempt %d: connecting probe at %s",
+    },
+    "log_connecting_probe": {
+        "zh": "连接调试探针 ...",
+        "en": "Connecting debug probe ...",
+    },
+    "log_using_held": {
+        "zh": "使用已连接的探针 ...",
+        "en": "Using the connected probe ...",
+    },
+    "log_flash_start": {
+        "zh": "烧录 %s -> 0x%08X（整片擦除=%s）",
+        "en": "Flashing %s -> 0x%08X (chip erase=%s)",
+    },
+    "log_attempt_ok": {
+        "zh": "（第 %d 次尝试成功）",
+        "en": "(attempt %d succeeded)",
+    },
+    "log_flash_done": {
+        "zh": "烧录完成，已复位。",
+        "en": "Flashing complete, target reset.",
+    },
+    "msg_flash_done": {"zh": "烧录完成", "en": "Flash complete"},
+    "log_jitter": {
+        "zh": "第 %d 次 SWD 通信抖动（%s），重建链路后重试 ...",
+        "en": "SWD jitter on attempt %d (%s); rebuilding the link and "
+              "retrying ...",
+    },
+    "log_swd_fail_retry": {
+        "zh": "SWD 通信失败（%s）。已重试 %d 次%s"
+              "仍未成功：请检查杜邦线 / 供电，重插拔探针后再试。",
+        "en": "SWD communication failed (%s). Retried %d time(s)%s without "
+              "success: check jumper wires / power, re-plug the probe and "
+              "try again.",
+    },
+    "note_slow_last": {"zh": "（末次已降速）", "en": " (last attempt slowed)"},
+    "log_swd_fail_held": {
+        "zh": "SWD 通信失败（%s）。请点『断开探针』后重新连接，再重试烧录。",
+        "en": "SWD communication failed (%s). Click 'Disconnect probe' and "
+              "reconnect, then retry flashing.",
+    },
+    "err_pyocd_assert": {
+        "zh": "pyocd 无法构建型号 %s 的 flash 内存布局（CMSIS-Pack 兼容性缺陷）。"
+              "请手动选择与芯片实际容量一致的型号。",
+        "en": "pyocd cannot build the flash memory map for model %s "
+              "(CMSIS-Pack compatibility defect). Manually select the model "
+              "matching the chip's actual capacity.",
+    },
+
+    # MatchWorker
+    "log_match_step": {
+        "zh": "配对 %d/%d：尝试型号 %s ...",
+        "en": "Matching %d/%d: trying model %s ...",
+    },
+    "log_match_no_probe": {
+        "zh": "  -> 无可用探针，跳过",
+        "en": "  -> no usable probe, skipped",
+    },
+    "log_match_dp_zero": {
+        "zh": "  -> DP IDCODE 为 0，跳过",
+        "en": "  -> DP IDCODE is 0, skipped",
+    },
+    "log_match_ok": {
+        "zh": "  -> 配对成功（DP IDCODE 0x%08X）",
+        "en": "  -> matched (DP IDCODE 0x%08X)",
+    },
+    "log_match_err": {
+        "zh": "  -> 配对失败：%s: %s",
+        "en": "  -> failed: %s: %s",
+    },
+    "log_match_empty_queue": {
+        "zh": "未导入 CMSIS Pack（型号队列为空）",
+        "en": "CMSIS Pack not imported (model queue is empty)",
+    },
+
+    # image info lines
+    "info_qboot": {
+        "zh": "  QBOOT   : %d B, CRC32 0x%08X",
+        "en": "  QBOOT   : %d B, CRC32 0x%08X",
+    },
+    "info_app": {
+        "zh": "  APP     : %d B, CRC32 0x%08X",
+        "en": "  APP     : %d B, CRC32 0x%08X",
+    },
+    "info_app_len": {
+        "zh": "  APP     : %d B (image_len), CRC32 0x%08X",
+        "en": "  APP     : %d B (image_len), CRC32 0x%08X",
+    },
+    "info_layout": {
+        "zh": "  布局    : QBOOT 0x%08X / META 0x%08X / APP 0x%08X / "
+              "APP 容量 0x%X B",
+        "en": "  Layout  : QBOOT 0x%08X / META 0x%08X / APP 0x%08X / "
+              "APP capacity 0x%X B",
+    },
+    "info_layout_short": {
+        "zh": "  布局    : QBOOT 0x%08X / META 0x%08X / APP 0x%08X",
+        "en": "  Layout  : QBOOT 0x%08X / META 0x%08X / APP 0x%08X",
+    },
+    "info_variant": {"zh": "  变体    : %s%s", "en": "  Variant : %s%s"},
+    "info_variant_unknown": {
+        "zh": "（未识别，请人工核对）",
+        "en": " (unrecognized, verify manually)",
+    },
+    "info_signed": {"zh": "已用 Ed25519 私钥签名", "en": "signed with the Ed25519 private key"},
+    "info_unsigned": {"zh": "未签名", "en": "not signed"},
+    "info_sig_line": {"zh": "  签名    : %s", "en": "  Sig     : %s"},
+    "info_seal_line": {"zh": "  seal    : %s", "en": "  seal    : %s"},
+    "info_sig_nonzero": {
+        "zh": "sig 非零（CHECK 变体不验签，仅记录）",
+        "en": "sig non-zero (CHECK variant does not verify it; recorded only)",
+    },
+    "info_floor": {
+        "zh": "防降级下限 = 镜像 secver",
+        "en": "anti-rollback floor = image secver",
+    },
+    "info_floor_line": {
+        "zh": "  floor   : %d（防降级下限 = 镜像 secver）",
+        "en": "  floor   : %d (anti-rollback floor = image secver)",
+    },
+    "info_seal": {
+        "zh": "已预置（SEALED 首启免 ~20 s 验签）",
+        "en": "pre-set (SEALED skips ~20 s verify at first boot)",
+    },
+    "info_version": {
+        "zh": "  version : %d / flag : %d (APP1) / seq : %d",
+        "en": "  version : %d / flag : %d (APP1) / seq : %d",
+    },
+    "info_sha256": {"zh": "  SHA-256 : %s", "en": "  SHA-256 : %s"},
+    "info_msp": {
+        "zh": "  APP MSP 0x%08X / reset 0x%08X；QBOOT MSP 0x%08X / reset 0x%08X",
+        "en": "  APP MSP 0x%08X / reset 0x%08X; QBOOT MSP 0x%08X / reset 0x%08X",
+    },
+    "info_msp_app": {
+        "zh": "  APP MSP 0x%08X / reset 0x%08X",
+        "en": "  APP MSP 0x%08X / reset 0x%08X",
+    },
+    "info_secver": {
+        "zh": "  secver  : %d（偏移 0x400，\"QAV1\"）",
+        "en": "  secver  : %d (offset 0x400, \"QAV1\")",
+    },
+    "warn_need_key": {
+        "zh": "  [!] %s 变体导出必须提供 Ed25519 私钥（当前未选）",
+        "en": "  [!] Exporting the %s variant requires the Ed25519 private "
+              "key (none selected)",
+    },
+    "warn_unknown_variant": {
+        "zh": "  [!] 未识别到变体串，请核对 QBOOT bin 是否串了构建产物",
+        "en": "  [!] Variant string not recognized; check whether the QBOOT "
+              "bin is the wrong build artifact",
+    },
+    "log_image_read_fail": {
+        "zh": "镜像文件读取失败：%s",
+        "en": "Failed to read image file: %s",
+    },
+    "err_parse_layout": {
+        "zh": "%s 不是合法的十六进制地址：%r",
+        "en": "%s is not a valid hexadecimal address: %r",
+    },
+    "err_parse_empty": {"zh": "%s 未填写", "en": "%s is empty"},
+    "err_parse_range": {
+        "zh": "%s 0x%08X 不在 FLASH [0x%08X, 0x%08X) 内",
+        "en": "%s 0x%08X is outside FLASH [0x%08X, 0x%08X)",
+    },
+
+    # mcu_identity.summary()
+    "id_target_model": {
+        "zh": "目标定义型号 : %s %s",
+        "en": "Target-defined model: %s %s",
+    },
+    "id_dbgmcu_fail": {
+        "zh": "DBGMCU 寄存器：读取失败或该芯片不支持上述地址",
+        "en": "DBGMCU registers: read failed or not supported on this chip",
+    },
+    "id_no_ident": {
+        "zh": "未读到任何芯片标识",
+        "en": "No chip identifier read",
+    },
+    "id_dp_fail": {
+        "zh": "DP IDCODE 读取失败：%s",
+        "en": "DP IDCODE read failed: %s",
+    },
 }
 
 _LANG = "zh"

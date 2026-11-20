@@ -232,17 +232,16 @@ def _parse_addr(text: str, name: str) -> int:
     """解析十六进制地址输入（支持 0x 前缀 / 纯十六进制）。"""
     text = text.strip()
     if not text:
-        raise core.ImageError("%s 未填写" % name)
+        raise core.ImageError(tr("err_parse_empty", name))
     try:
         # 输入栏只显示纯十六进制（如 08006000）；int(text, 0) 会把
         # 前导 0 当八进制而拒绝，所以无前缀时按 16 进制解析。
         value = int(text, 16) if not text.lower().startswith("0x") else int(text, 0)
     except ValueError:
-        raise core.ImageError("%s 不是合法的十六进制地址：%r" % (name, text))
+        raise core.ImageError(tr("err_parse_layout", name, text))
     if not core.FLASH_BASE <= value < core.FLASH_BASE + core.FLASH_SIZE:
         raise core.ImageError(
-            "%s 0x%08X 不在 FLASH [0x%08X, 0x%08X) 内"
-            % (name, value, core.FLASH_BASE,
+            tr("err_parse_range", name, value, core.FLASH_BASE,
                core.FLASH_BASE + core.FLASH_SIZE))
     return value
 
@@ -318,7 +317,7 @@ class FlashWorker(QThread):
     def run(self):
         mods, err = _ensure_pyocd()
         if mods is None:
-            self.done.emit(False, "未检测到 pyocd：%s" % err)
+            self.done.emit(False, tr("log_pyocd_missing_short", err))
             return
         ConnectHelper = mods["ConnectHelper"]
         FileProgrammer = mods["FileProgrammer"]
@@ -344,26 +343,23 @@ class FlashWorker(QThread):
                     rate_txt = ("%d MHz" % (rate_hz // 1000000)
                                 if rate_hz % 1000000 == 0
                                 else "%d kHz" % (rate_hz // 1000))
-                    self.log_line.emit(
-                        "第 %d 次尝试：以 %s 速率连接探针"
-                        % (attempt, rate_txt))
+                    self.log_line.emit(tr("log_attempt", attempt, rate_txt))
 
-                    self.log_line.emit("连接调试探针 ...")
+                    self.log_line.emit(tr("log_connecting_probe"))
                     session = ConnectHelper.session_with_chosen_probe(**kwargs)
                     if session is None:
-                        raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
+                        raise RuntimeError(tr("log_no_probe_detail"))
 
                     session.open()
                 else:
                     session = self.session
-                    self.log_line.emit("使用已连接的探针 ...")
+                    self.log_line.emit(tr("log_using_held"))
                 # pyocd 的 chip_erase 只接受 'chip' / 'sector' / None，
                 # 不接受布尔值（builder.erase 会抛 invalid chip_erase value）。
                 erase_arg = "chip" if self.chip_erase else None
                 self.log_line.emit(
-                    "烧录 %s -> 0x%08X（整片擦除=%s）"
-                    % (self.image_path, self.base_address,
-                       "是" if self.chip_erase else "否")
+                    tr("log_flash_start", self.image_path, self.base_address,
+                       tr("msg_yes") if self.chip_erase else tr("msg_no"))
                 )
                 if attempt > 1:
                     self.progress_value.emit(0)
@@ -378,30 +374,28 @@ class FlashWorker(QThread):
                 ).program(self.image_path, base_address=self.base_address)
                 session.target.reset()
                 if attempt > 1:
-                    self.log_line.emit("（第 %d 次尝试成功）" % attempt)
-                self.log_line.emit("烧录完成，已复位。")
-                self.done.emit(True, "烧录完成")
+                    self.log_line.emit(tr("log_attempt_ok", attempt))
+                self.log_line.emit(tr("log_flash_done"))
+                self.done.emit(True, tr("msg_flash_done"))
                 return
             except TransferError as exc:
                 if attempt < max_attempts:
                     # 首次抖动是已知的探针固件行为（重建链路即成功），
                     # 降为简洁提示，不刷大坨 traceback 吓人。
                     self.log_line.emit(
-                        "第 %d 次 SWD 通信抖动（%s），重建链路后重试 ..."
-                        % (attempt, str(exc).split(";")[0].strip()))
+                        tr("log_jitter", attempt,
+                           str(exc).split(";")[0].strip()))
                     continue                    # finally 关会话；下轮重建链路
                 # 三次都失败才打印完整堆栈，便于诊断真实硬件故障。
                 self.log_line.emit(traceback.format_exc())
                 if owned:
-                    slow_note = "（末次已降速）" if self.auto_slow else ""
-                    self.done.emit(False, (
-                        "SWD 通信失败（%s）。已重试 %d 次%s"
-                        "仍未成功：请检查杜邦线 / 供电，重插拔探针后再试。"
-                        % (exc, max_attempts - 1, slow_note)))
+                    slow_note = tr("note_slow_last") if self.auto_slow else ""
+                    self.done.emit(False, tr(
+                        "log_swd_fail_retry", str(exc), max_attempts - 1,
+                        slow_note))
                 else:
-                    self.done.emit(False, (
-                        "SWD 通信失败（%s）。请点『断开探针』后重新连接，"
-                        "再重试烧录。" % exc))
+                    self.done.emit(False,
+                                   tr("log_swd_fail_held", str(exc)))
                 return
             except Exception as exc:            # pragma: no cover
                 self.log_line.emit(traceback.format_exc())
@@ -426,9 +420,7 @@ def _friendly_pyocd_error(exc: Exception, target: str, pack_path: str) -> str:
     """
     base = "%s: %s" % (type(exc).__name__, exc)
     if isinstance(exc, AssertionError) and pack_path:
-        return (
-            "pyocd 无法构建型号 %s 的 flash 内存布局（CMSIS-Pack 兼容性缺陷）。"
-            "请手动选择与芯片实际容量一致的型号。" % (target or "未知"))
+        return tr("err_pyocd_assert", target or "未知")
     return base
 
 
@@ -463,7 +455,7 @@ class IdentityWorker(QThread):
         try:
             mods, err = _ensure_pyocd()
             if mods is None:
-                self.done.emit(None, "未检测到 pyocd：%s" % err)
+                self.done.emit(None, tr("log_pyocd_missing_short", err))
                 return
             ConnectHelper = mods["ConnectHelper"]
             from mcu_identity import read_identity
@@ -490,7 +482,7 @@ class IdentityWorker(QThread):
                     kwargs["return_first"] = True
                 session = ConnectHelper.session_with_chosen_probe(**kwargs)
                 if session is None:
-                    self.done.emit(None, "未找到可用探针")
+                    self.done.emit(None, tr("log_no_probe"))
                     return
                 session.open()
             ident = read_identity(session)
@@ -536,21 +528,20 @@ class MatchWorker(QThread):
     def run(self):
         mods, err = _ensure_pyocd()
         if mods is None:
-            self.done.emit(None, "未检测到 pyocd：%s" % err)
+            self.done.emit(None, tr("log_pyocd_missing_short", err))
             return
         ConnectHelper = mods["ConnectHelper"]
         total = len(self.devices)
         if total == 0:
-            self.done.emit(None, "未导入 CMSIS Pack（型号队列为空）")
+            self.done.emit(None, tr("log_match_empty_queue"))
             return
         for i, dev in enumerate(self.devices, 1):
             if self._stop:
-                self.done.emit(None, "已取消配对")
+                self.done.emit(None, tr("match_cancelled"))
                 return
             target = dev.part_number.strip().lower()
             self.progress.emit(i, total, dev.part_number)
-            self.log_line.emit("配对 %d/%d：尝试型号 %s ..."
-                               % (i, total, dev.part_number))
+            self.log_line.emit(tr("log_match_step", i, total, dev.part_number))
             session = None
             try:
                 kwargs = {
@@ -569,21 +560,21 @@ class MatchWorker(QThread):
                     kwargs["return_first"] = True
                 session = ConnectHelper.session_with_chosen_probe(**kwargs)
                 if session is None:
-                    self.log_line.emit("  -> 无可用探针，跳过")
+                    self.log_line.emit(tr("log_match_no_probe"))
                     continue
                 session.open()
                 # 能 open 且 DP IDCODE 非 0 视为配对成功（硬件响应 SWD）。
                 dp_idr = int(session.target.dp.dpidr.idr)
                 if not dp_idr:
-                    self.log_line.emit("  -> DP IDCODE 为 0，跳过")
+                    self.log_line.emit(tr("log_match_dp_zero"))
                     continue
-                self.log_line.emit("  -> 配对成功（DP IDCODE 0x%08X）" % dp_idr)
+                self.log_line.emit(tr("log_match_ok", dp_idr))
                 self.done.emit(dev, "")
                 return
             except Exception as exc:
                 # 坏型号会在 open 中途 assert；记一行，继续下一个。
-                self.log_line.emit("  -> 配对失败：%s: %s"
-                                   % (type(exc).__name__, exc))
+                self.log_line.emit(
+                    tr("log_match_err", type(exc).__name__, str(exc)))
             finally:
                 if session is not None:
                     try:
@@ -610,7 +601,7 @@ class ConnWorker(QThread):
     def run(self):
         mods, err = _ensure_pyocd()
         if mods is None:
-            self.done.emit(None, "未检测到 pyocd：%s" % err)
+            self.done.emit(None, tr("log_pyocd_missing_short", err))
             return
         ConnectHelper = mods["ConnectHelper"]
         session = None
@@ -631,7 +622,7 @@ class ConnWorker(QThread):
                 kwargs["return_first"] = True
             session = ConnectHelper.session_with_chosen_probe(**kwargs)
             if session is None:
-                self.done.emit(None, "未找到可用探针")
+                self.done.emit(None, tr("log_no_probe"))
                 return
             session.open()
             self.done.emit(session, "")
@@ -711,8 +702,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         # pyocd 现为惰性导入，是否可用在首次枚举探针时报告（ProbeWorker）。
-        self.log("烧录地址默认取自 CMSIS Pack 的 flash 起始（可勾选手动设置）；"
-                 "布局参数仅打包页使用。")
+        self.log(tr("log_startup"))
         self._restore_state()
         self._hook_autosave()
 
@@ -804,7 +794,7 @@ class MainWindow(QMainWindow):
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 state = json.load(f)
         except (OSError, ValueError) as exc:
-            self.log("[提示] 状态文件读取失败（%s），使用默认值。" % exc)
+            self.log(tr("log_state_read_fail", exc))
             return
         if not isinstance(state, dict):
             return
@@ -835,7 +825,7 @@ class MainWindow(QMainWindow):
                 # pack 推导的 target 是权威的（pyocd 从 pack 生成 target），
                 # 不用存档里可能已过时的 target 覆盖它。用户仍可随时手改。
             except Exception as exc:
-                self.log("[提示] 恢复 CMSIS Pack 失败（%s）。" % exc)
+                self.log(tr("log_restore_pack_fail", exc))
         if "version" in state:
             try:
                 self.spin_version.setValue(int(state["version"]))
@@ -858,7 +848,7 @@ class MainWindow(QMainWindow):
             self.cb_manual_base.setChecked(bool(state["manual_base"]))
         if self.cb_manual_base.isChecked() and state.get("flash_base"):
             self.ed_flash_base.setText(str(state["flash_base"]))
-        self.log("[提示] 已从 %s 恢复上次的路径与选项。" % STATE_PATH)
+        self.log(tr("log_restored", STATE_PATH))
 
     def _hook_autosave(self):
         """任何路径/选项变化都立即落盘，无需手动保存。"""
@@ -939,7 +929,7 @@ class MainWindow(QMainWindow):
             devices = load_pack_devices(path)
         except Exception as exc:
             QMessageBox.critical(self, tr("dlg_pack_parse_fail"), str(exc))
-            self.log("Pack 解析失败：%s" % exc)
+            self.log(tr("log_pack_parse_fail", exc))
             return
         if not devices:
             QMessageBox.warning(self, tr("dlg_no_chips"), tr("msg_no_chips"))
@@ -971,11 +961,10 @@ class MainWindow(QMainWindow):
         self._on_mcu_changed()
         cur = self._mcu_target()
         if prev_target and cur != prev_target:
-            self.log("[提示] 原型号 %s 不在此 Pack 中，已切换到 %s；"
-                     "请确认后再读取型号 / 烧录。" % (prev_target, cur))
+            self.log(tr("log_model_switched", prev_target, cur))
         else:
-            self.log("当前选中型号：%s" % cur)
-        self.log("Pack 已导入：%s（%d 个芯片）" % (path, len(devices)))
+            self.log(tr("log_current_model", cur))
+        self.log(tr("log_pack_imported", path, len(devices)))
         self._save_state()
 
     def _mcu_by_part(self, part: str):
@@ -1027,8 +1016,7 @@ class MainWindow(QMainWindow):
 
     def _on_rate_changed(self, _idx=0):
         # 速率切换立即写日志（Ali 要求：切换速率要 log 打印当前速率）。
-        self.log("探针速率已设为 %s（下次连接 / 烧录生效）"
-                 % self._format_rate(self._rate_hz()))
+        self.log(tr("log_rate_set", self._format_rate(self._rate_hz())))
 
     def _apply_pack_flash_base(self):
         """未勾手动设置时，把烧录地址更新为当前 pack 芯片的 flash 起始。"""
@@ -1315,45 +1303,40 @@ class MainWindow(QMainWindow):
     def _log_common_info(self, boot: bytes, app: bytes, layout: dict,
                          variant: str):
         """load 后的通用信息：大小 / CRC32 / 布局 / 变体。"""
-        self.log("  QBOOT   : %d B, CRC32 0x%08X"
-                 % (len(boot), core.crc32_ieee(boot)))
-        self.log("  APP     : %d B, CRC32 0x%08X"
-                 % (len(app), core.crc32_ieee(app)))
-        self.log("  布局    : QBOOT 0x%08X / META 0x%08X / APP 0x%08X / "
-                 "APP 容量 0x%X B"
-                 % (core.FLASH_BASE, layout["meta_base"],
+        self.log(tr("info_qboot", len(boot), core.crc32_ieee(boot)))
+        self.log(tr("info_app", len(app), core.crc32_ieee(app)))
+        self.log(tr("info_layout", core.FLASH_BASE, layout["meta_base"],
                     layout["app_start"], layout["app_size"]))
-        self.log("  变体    : %s%s"
-                 % (variant,
-                    "" if variant != "unknown" else "（未识别，请人工核对）"))
+        self.log(tr("info_variant", variant,
+                    "" if variant != "unknown"
+                    else tr("info_variant_unknown")))
 
     def _show_info(self, info: dict):
         if info.get("boot_size"):
-            self.log("  QBOOT   : %d B, CRC32 0x%08X"
-                     % (info["boot_size"], info.get("boot_crc", 0)))
+            self.log(tr("info_qboot", info["boot_size"],
+                        info.get("boot_crc", 0)))
         if info.get("app_crc") is not None:
-            self.log("  APP     : %d B (image_len), CRC32 0x%08X"
-                     % (info["image_len"], info["app_crc"]))
+            self.log(tr("info_app_len", info["image_len"], info["app_crc"]))
         if info.get("meta_base") and info.get("app_start"):
-            self.log("  布局    : QBOOT 0x%08X / META 0x%08X / APP 0x%08X"
-                     % (core.FLASH_BASE, info["meta_base"], info["app_start"]))
+            self.log(tr("info_layout_short", core.FLASH_BASE,
+                        info["meta_base"], info["app_start"]))
         variant = info.get("variant", "unknown")
-        self.log("  变体    : %s%s"
-                 % (variant,
-                    "" if variant != "unknown" else "（未识别，请人工核对）"))
+        self.log(tr("info_variant", variant,
+                    "" if variant != "unknown"
+                    else tr("info_variant_unknown")))
         if variant in ("SEALED", "SEC"):
-            self.log("  签名    : %s" % ("已用 Ed25519 私钥签名"
-                                           if info.get("signed") else "未签名"))
+            self.log(tr("info_sig_line",
+                        tr("info_signed") if info.get("signed")
+                        else tr("info_unsigned")))
             if info.get("floor"):
-                self.log("  floor   : %d（防降级下限 = 镜像 secver）" % info["floor"])
+                self.log(tr("info_floor_line", info["floor"]))
             if info.get("seal_preset"):
-                self.log("  seal    : 已预置（SEALED 首启免 ~20 s 验签）")
+                self.log(tr("info_seal_line", tr("info_seal")))
         elif variant == "CHECK" and not info.get("sig_zero", 1):
-            self.log("  签名    : sig 非零（CHECK 变体不验签，仅记录）")
-        self.log("  version : %d / flag : %d (APP1) / seq : %d"
-                 % (info["version"], info.get("flag", core.FLAG_APP1),
-                    info.get("seq", 1)))
-        self.log("  SHA-256 : %s" % info["hash"].hex())
+            self.log(tr("info_sig_line", tr("info_sig_nonzero")))
+        self.log(tr("info_version", info["version"],
+                    info.get("flag", core.FLAG_APP1), info.get("seq", 1)))
+        self.log(tr("info_sha256", info["hash"].hex()))
 
     def _build(self, out_path: str, meta_out: str = "") -> bool:
         try:
@@ -1367,15 +1350,14 @@ class MainWindow(QMainWindow):
             core._write_file(out_path, combined)
             if meta_out:
                 core._write_file(meta_out, rec)
-            self.log("已生成整片 bin：%s (%d B)" % (out_path, len(combined)))
+            self.log(tr("log_generated", out_path, len(combined)))
             self._show_info(info)
             if meta_out:
-                self.log("  已导出 META 记录：%s (256 B, 0x%08X)"
-                         % (meta_out, info["meta_base"]))
+                self.log(tr("log_meta_exported", meta_out, info["meta_base"]))
             return True
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(self, tr("dlg_gen_fail"), str(exc))
-            self.log("生成失败：%s" % exc)
+            self.log(tr("log_gen_fail", exc))
             return False
 
     # ------------------------------------------------------------ 槽
@@ -1391,7 +1373,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, tr("dlg_parse_fail"),
                                  tr("msg_read_image_fail", str(exc)))
-            self.log("解析失败：%s" % exc)
+            self.log(tr("log_parse_fail", exc))
             return
         try:
             meta_base, app_start = self._layout_addrs()
@@ -1399,7 +1381,7 @@ class MainWindow(QMainWindow):
                                          self._chip_geometry())
         except core.ImageError as exc:
             QMessageBox.critical(self, tr("dlg_parse_fail"), str(exc))
-            self.log("解析失败：%s" % exc)
+            self.log(tr("log_parse_fail", exc))
             return
 
         # 向量表硬错误仍然拦截（镜像本身不合法，后续无从谈起）
@@ -1411,28 +1393,27 @@ class MainWindow(QMainWindow):
                 self._chip_geometry())
         except core.ImageError as exc:
             QMessageBox.critical(self, tr("dlg_parse_fail"), str(exc))
-            self.log("解析失败：%s" % exc)
+            self.log(tr("log_parse_fail", exc))
             return
 
-        self.log("解析通过（未写文件）")
+        self.log(tr("log_parse_ok"))
         variant = core.detect_variant(boot)
         self._log_common_info(boot, app, layout, variant)
-        self.log("  APP MSP 0x%08X / reset 0x%08X；QBOOT MSP 0x%08X / reset 0x%08X"
-                 % (app_sp, app_reset, boot_sp, boot_reset))
-        self.log("  APP SHA-256 : %s" % hashlib.sha256(app).hexdigest())
+        self.log(tr("info_msp", app_sp, app_reset, boot_sp, boot_reset))
+        self.log(tr("info_sha256", hashlib.sha256(app).hexdigest()))
 
         # 签名前置条件：预览只警告，不拦截
         if variant in ("SEALED", "SEC"):
             key_path = self.ed_key.text().strip()
             if not key_path:
-                self.log("  [!] %s 变体导出必须提供 Ed25519 私钥（当前未选）" % variant)
+                self.log(tr("warn_need_key", variant))
             try:
                 secver = core.read_secver(app)
-                self.log("  secver  : %d（偏移 0x400，\"QAV1\"）" % secver)
+                self.log(tr("info_secver", secver))
             except core.ImageError as exc:
-                self.log("  [!] %s" % exc)
+                self.log("  [!] %s" % exc)  # core 异常文本，保持原文
         elif variant == "unknown":
-            self.log("  [!] 未识别到变体串，请核对 QBOOT bin 是否串了构建产物")
+            self.log(tr("warn_unknown_variant"))
 
     def _refresh_probes(self):
         """后台枚举探针；完成前下拉框显示进行中提示，读型号按钮不可用。"""
@@ -1449,8 +1430,7 @@ class MainWindow(QMainWindow):
         self.cmb_probe.clear()
         if error:
             self.cmb_probe.addItem(tr("probe_pyocd_err", error), "")
-            self.log("[提示] pyocd 未安装或加载失败（%s），打包页可正常使用，"
-                     "烧录页需先 pip install pyocd" % error)
+            self.log(tr("log_pyocd_hint", error))
             return
         if not probes:
             # 枚举为空不影响烧录：probe_id 为空时 FlashWorker 会用
@@ -1485,12 +1465,12 @@ class MainWindow(QMainWindow):
             return
         self.btn_conn.setEnabled(False)
         self.btn_conn.setText(tr("btn_connecting"))
-        self.log("连接探针（attach 模式，不打断目标运行）...")
+        self.log(tr("log_connecting_attach"))
         self.conn_worker = ConnWorker(
             probe_id, self._mcu_target(), self.ed_chip_pack.text().strip(),
             frequency=self._rate_hz())
         self.conn_worker.done_log.connect(
-            lambda tb: self.log("[堆栈]\n" + tb.strip()))
+            lambda tb: self.log(tr("log_stack_prefix") + tb.strip()))
         self.conn_worker.done.connect(self._connect_done)
         self.conn_worker.start()
 
@@ -1500,14 +1480,13 @@ class MainWindow(QMainWindow):
             self.btn_conn.setEnabled(True)
             QMessageBox.critical(self, tr("dlg_conn_fail"),
                                  error or tr("dlg_unknown_err"))
-            self.log("探针连接失败：%s" % error)
+            self.log(tr("log_connect_fail", error))
             # 探针可能已从总线消失（固件挂死重枚举），刷新一次列表。
             self._refresh_probes()
             return
         self._held_session = session
         self._set_conn_state(True)
-        self.log("探针已连接并持有；读型号将复用本次连接，"
-                 "烧录使用独立会话（点击烧录时会自动断开本连接）。")
+        self.log(tr("log_held_session"))
 
     def _disconnect_probe(self):
         """关闭持有的 session 并重新枚举。close 可能阻塞，放后台线程。"""
@@ -1523,8 +1502,8 @@ class MainWindow(QMainWindow):
         had = self._held_session is not None
         self._held_session = None
         self._set_conn_state(False)
-        self.log("探针已断开。" if not error else
-                 "断开时出错（不影响重新连接）：%s" % error)
+        self.log(tr("log_disconnected") if not error else
+                 tr("log_disconnect_err", error))
         if had:
             self._refresh_probes()
         # 烧录被"先断开"挂起：持有会话释放后立即用独立会话续烧。
@@ -1615,14 +1594,13 @@ class MainWindow(QMainWindow):
             self.match_progress.close()
             self.match_progress = None
         self.btn_identity.setEnabled(True)
-        if error and error != "已取消配对":
-            self.log("配对失败：%s" % error)
+        if error and error != tr("match_cancelled"):
+            self.log(tr("log_match_fail", error))
         if dev is None:
-            if error == "已取消配对":
+            if error == tr("match_cancelled"):
                 return
             QMessageBox.warning(self, tr("dlg_mcu_model"), tr("msg_no_match"))
-            self.log("未匹配到正确MCU型号（已尝试 %d 个型号）"
-                     % len(self.pack_devices))
+            self.log(tr("log_no_match_n", len(self.pack_devices)))
             self._refresh_probes()
             return
         # 配对成功：走统一的匹配结果处理（自动选中 + 简洁提示）。
@@ -1657,7 +1635,7 @@ class MainWindow(QMainWindow):
             hint += tr("hint_offline")
             QMessageBox.critical(self, tr("dlg_read_fail"),
                                  (error or tr("dlg_unknown_err")) + hint)
-            self.log("读取 MCU 型号失败（target=%s）：%s" % (target, error))
+            self.log(tr("log_read_fail", target, error))
             self._refresh_probes()
             return
         # 只读 pyocd target 报告的型号，不凭原始 ID 猜型号。
@@ -1678,7 +1656,7 @@ class MainWindow(QMainWindow):
             if compat:
                 msg += "\n" + tr("msg_compat", "、".join(compat))
             QMessageBox.information(self, tr("dlg_mcu_model"), msg)
-            self.log(msg.replace("\n", "；"))
+            self.log(msg.replace("\n", "；" if get_lang() == "zh" else "; "))
         else:
             # 无回值或在 pack 中匹配不到（0 个 / 多个）：明确提示未适配。
             msg = tr("msg_not_adapted", read_model or tr("raw_no_model"))
@@ -1708,13 +1686,13 @@ class MainWindow(QMainWindow):
                                         app_start=app_start,
                                         target=self._chip(),
                                         geometry=self._chip_geometry())
-            self.log("烧前校验通过：%s" % image_path)
+            self.log(tr("log_preflash_ok", image_path))
             self._show_info(info)
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(
                 self, tr("dlg_verify_pre_fail"),
                 tr("msg_verify_pre_fail", str(exc)))
-            self.log("烧前校验失败：%s" % exc)
+            self.log(tr("log_preflash_fail", exc))
             return
         if not self._target_ready():
             return
@@ -1725,7 +1703,7 @@ class MainWindow(QMainWindow):
         # 降时钟三级重试，已验证可自愈）。
         if self._held_session is not None:
             self._pending_flash = True
-            self.log("烧录前先断开 attach 持有会话，随后用独立会话烧录 ...")
+            self.log(tr("log_disconnect_before_flash"))
             self._disconnect_probe()
             return
         self._start_flash()
@@ -1788,7 +1766,7 @@ class MainWindow(QMainWindow):
                 meta_base=meta_base, app_start=app_start,
                 target=self._chip(), geometry=self._chip_geometry())
             core._write_file(path, rec)
-            self.log("已导出 META 记录：%s" % path)
+            self.log(tr("log_meta_only_exported", path))
             self._show_info(info)
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(self, tr("dlg_export_fail"), str(exc))
@@ -1807,15 +1785,14 @@ class MainWindow(QMainWindow):
                                         app_start=app_start,
                                         target=self._chip(),
                                         geometry=self._chip_geometry())
-            self.log("校验通过：%s" % path)
+            self.log(tr("log_verify_ok", path))
             self._show_info(info)
-            self.log("  APP MSP 0x%08X / reset 0x%08X"
-                     % (info["app_sp"], info["app_reset"]))
+            self.log(tr("info_msp_app", info["app_sp"], info["app_reset"]))
             QMessageBox.information(self, tr("dlg_done"),
                                     tr("msg_verify_ok", path))
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(self, tr("dlg_verify_fail"), str(exc))
-            self.log("校验失败：%s" % exc)
+            self.log(tr("log_verify_fail", exc))
 
     def _do_verify(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1830,15 +1807,14 @@ class MainWindow(QMainWindow):
                                         app_start=app_start,
                                         target=self._chip(),
                                         geometry=self._chip_geometry())
-            self.log("校验通过：%s" % path)
+            self.log(tr("log_verify_ok", path))
             self._show_info(info)
-            self.log("  APP MSP 0x%08X / reset 0x%08X"
-                     % (info["app_sp"], info["app_reset"]))
+            self.log(tr("info_msp_app", info["app_sp"], info["app_reset"]))
             QMessageBox.information(self, tr("dlg_done"),
                                     tr("msg_verify_ok", path))
         except (core.ImageError, OSError) as exc:
             QMessageBox.critical(self, "校验失败", str(exc))
-            self.log("校验失败：%s" % exc)
+            self.log(tr("log_verify_fail", exc))
 
 
 def main() -> int:

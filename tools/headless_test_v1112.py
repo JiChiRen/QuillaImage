@@ -143,77 +143,71 @@ check("copy-log button present", any(t == "复制日志" for t in all_buttons))
 check("identity button near MCU combo parent",
       win.btn_identity.parent() is win.cmb_mcu.parent())
 
-# ---- 6. get_state tolerance for SWD jitter during erase (v1.1.16) ----
-class _JitterTransferError(Exception):
-    pass
+# ---- 6. post-connect settle delay before program (v1.1.17) ----
+# Root cause: 1st attempt opened the session then programmed immediately;
+# 2nd attempt always waited 1.5 s between sessions and always succeeded.
+# The fix waits after connect before program (not an API-level patch).
+check("post-connect delay defined",
+      hasattr(gui.FlashWorker, "POST_CONNECT_DELAY_S") and
+      gui.FlashWorker.POST_CONNECT_DELAY_S >= 1.0,
+      str(gui.FlashWorker.POST_CONNECT_DELAY_S))
+
+import types  # noqa: E402
+_sleeps = []
 
 
-class _State:
-    RUNNING = "RUNNING"
-    HALTED = "HALTED"
+class _ProbeTarget:
+    def reset(self):
+        pass
 
 
-class _TargetClass:
-    State = _State
+class _Probe:
+    def __init__(self):
+        self.target = _ProbeTarget()
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
 
 
-class _JitterTarget:
-    """First N get_state calls raise TransferError, then report HALTED."""
-
-    def __init__(self, fail_times):
-        self.fail_times = fail_times
-        self.calls = 0
-
-    def get_state(self):
-        self.calls += 1
-        if self.calls <= self.fail_times:
-            raise _JitterTransferError("No ACK")
-        return _State.HALTED
+class _ProbeHelper:
+    def session_with_chosen_probe(self, **kwargs):
+        return _Probe()
 
 
-class _FakeSessionForPatch:
-    def __init__(self, target):
-        self.target = target
+class _OKProgrammer:
+    def __init__(self, *a, **k):
+        pass
+
+    def program(self, *a, **k):
+        pass
 
 
-w = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
-                    frequency=1000000, auto_slow=False)
-logs = []
-w.log_line.connect(logs.append)
-
-# a few transient errors are swallowed -> polling keeps going
-tgt = _JitterTarget(fail_times=3)
-sess = _FakeSessionForPatch(tgt)
-restore = w._patch_get_state(sess, _JitterTransferError, _TargetClass)
-states = []
-for _ in range(5):
-    states.append(sess.target.get_state())
-check("jitter swallowed, returns last/RUNNING",
-      states[0] == _State.RUNNING and states[-1] == _State.HALTED,
-      str(states))
-check("jitter logged", any("SWD 抖动" in s for s in logs), str(logs[:4]))
-restore()
-check("get_state restored after program",
-      sess.target.get_state.__func__ is _JitterTarget.get_state)
-
-# sustained failure beyond tolerance -> re-raise, restore, no infinite swallow
-w2 = gui.FlashWorker("x.bin", "", "cortex_m", "", False)
-logs2 = []
-w2.log_line.connect(logs2.append)
-tgt2 = _JitterTarget(fail_times=999)
-sess2 = _FakeSessionForPatch(tgt2)
-w2.GET_STATE_TOLERANCE = 3
-restore2 = w2._patch_get_state(sess2, _JitterTransferError, _TargetClass)
-raised = False
+gui._PY = {"ConnectHelper": _ProbeHelper(),
+           "FileProgrammer": _OKProgrammer,
+           "TransferError": Exception}
+_real_sleep = gui.time.sleep
+gui.time.sleep = lambda sec: _sleeps.append(sec)
 try:
-    for _ in range(5):
-        sess2.target.get_state()
-except _JitterTransferError:
-    raised = True
-check("sustained error re-raised past tolerance", raised)
-check("tolerance-exceeded logged",
-      any("停止容错" in s for s in logs2), str(logs2[-3:]))
-restore2()
+    w = gui.FlashWorker("x.bin", "", "cortex_m", "", False,
+                        frequency=1000000, auto_slow=False)
+    logs = []
+    w.log_line.connect(logs.append)
+    w.run()
+finally:
+    gui.time.sleep = _real_sleep
+check("sleeps after connect before program",
+      gui.FlashWorker.POST_CONNECT_DELAY_S in _sleeps, str(_sleeps))
+check("settle logged",
+      any("链路稳定后开始烧录" in s for s in logs), str(logs[:6]))
+check("sleeps after reset before close",
+      gui.FlashWorker.POST_RESET_DELAY_S in _sleeps, str(_sleeps))
+check("post-reset settle logged",
+      any("目标稳定后断开" in s for s in logs), str(logs[:8]))
+check("flash succeeds with settle delays",
+      any("烧录完成" in s for s in logs))
 
 print()
 if FAILS:

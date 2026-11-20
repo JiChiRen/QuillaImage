@@ -102,8 +102,9 @@ def run_worker(session=None):
     return logs, done, progress
 
 
-# keep the synchronous test fast - no real sleep between retries
+# keep the synchronous test fast - no real sleep for connect/retry
 gui.FlashWorker.FLASH_RETRY_DELAY_S = 0
+gui.FlashWorker.POST_CONNECT_DELAY_S = 0
 
 # ---- 1. transient fault: auto-retry with a fresh session succeeds ----
 FakeSession.opens = FakeSession.closes = 0
@@ -121,6 +122,8 @@ check("transient: all sessions closed", FakeSession.closes == 2,
       "closes=%d" % FakeSession.closes)
 check("transient: retry logged",
       any("自动重试" in s for s in logs))
+check("post-connect settle logged",
+      any("链路稳定后开始烧录" in s for s in logs))
 check("transient: progress reset before retry",
       any(v == 0 for v in progress))
 # calls[0] = first attempt at selected rate, [1] = lowered retry

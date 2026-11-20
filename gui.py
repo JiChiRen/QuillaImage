@@ -240,11 +240,16 @@ class FlashWorker(QThread):
     """在后台线程里执行 pyocd 烧录，避免阻塞 UI。"""
 
     FLASH_RETRY_DELAY_S = 1.5
-    # 擦除轮询期间容错的连续 SWD 抖动次数上限。pyocd flash.py 的
-    # wait_for_completion 只吞 TransferTimeout/Fault，不吞普通 TransferError，
-    # 擦除期间一次 ACK '5'/No ACK 就终止烧录。这里吞掉偶发抖动，但超过
-    # 上限即恢复并重新抛出，避免真挂死时被无限掩盖。
-    GET_STATE_TOLERANCE = 32
+    # Ali 上板：第 2 次尝试（会话间等了 1.5 s）必成功，第 1 次 open 后
+    # 立刻 program 必失败——根因是连接后读取过快、链路未稳，不是速率，
+    # 也不是某个 API 不容错（抖动点散见于 get_state / read32 / write_ap）。
+    # 因此连接成功后统一等待该窗口再 program；v1.1.16 的 get_state 打补丁
+    # 已被证伪（打地鼠），删除。
+    POST_CONNECT_DELAY_S = 1.5
+    # 烧录完成后 target.reset() 让目标从 halt 进入 running（APP 启动、时钟/
+    # SWD 引脚可能被 APP 重配），随后立刻 close() 在目标运行时断开 SWD。
+    # 下次连接撞上这个未稳状态 → 擦除期抖动。reset 后等该窗口再断开。
+    POST_RESET_DELAY_S = 0.5
 
     log_line = Signal(str)
     progress_value = Signal(int)
@@ -294,54 +299,6 @@ class FlashWorker(QThread):
             kwargs["return_first"] = True
         return kwargs
 
-    def _patch_get_state(self, session, TransferError, Target):
-        """包装 target.get_state 容忍擦除轮询期间的偶发 SWD 抖动。
-
-        pyocd 0.45.1 的 flash.py wait_for_completion 只吞 TransferTimeout/
-        Fault，不吞普通 TransferError（ACK '5'/No ACK）。擦除算法执行期间
-        一次抖动就终止整个烧录。这里在本次 program 期间临时替换 get_state：
-        遇到 TransferError 返回上次已知状态（默认 RUNNING）让轮询继续；
-        连续超过 GET_STATE_TOLERANCE 次则恢复原函数并重抛，避免真挂死被
-        无限掩盖。返回 (restore_fn)，program 结束（含异常）后调用恢复。
-        """
-        tgt = session.target
-        original = tgt.get_state
-        state = {"last": None, "consecutive": 0, "total": 0}
-        running_default = getattr(Target.State, "RUNNING")
-
-        def tolerant():
-            try:
-                result = original()
-                state["last"] = result
-                state["consecutive"] = 0
-                return result
-            except TransferError as exc:
-                state["consecutive"] += 1
-                state["total"] += 1
-                if state["consecutive"] > self.GET_STATE_TOLERANCE:
-                    self.log_line.emit(
-                        "get_state 连续 %d 次 SWD 抖动，判定链路异常，停止容错。"
-                        % state["consecutive"])
-                    raise
-                # 前几次抖动写日志，之后每 8 次汇总一次，避免刷屏。
-                if state["total"] <= 3 or state["total"] % 8 == 0:
-                    self.log_line.emit(
-                        "擦除轮询中 SWD 抖动（第 %d 次，%s），已忽略并继续等待。"
-                        % (state["total"], type(exc).__name__))
-                # 擦除期间目标应在运行算法；返回上次状态或 RUNNING 让
-                # wait_for_completion 的循环继续（它自己的 Timeout 兜底）。
-                return state["last"] if state["last"] is not None else running_default
-
-        def restore():
-            tgt.get_state = original
-            if state["total"]:
-                self.log_line.emit(
-                    "get_state 容错结束：本次共忽略 %d 次 SWD 抖动。"
-                    % state["total"])
-
-        tgt.get_state = tolerant
-        return restore
-
     def _progress(self, value):
         """pyocd 回调 0.0~1.0 浮点比例（见 utility/progress.py ProgressReport）。
 
@@ -376,7 +333,6 @@ class FlashWorker(QThread):
                 # 给探针/链路一点恢复时间（挂死的 WCH-Link 需要收尾）。
                 time.sleep(self.FLASH_RETRY_DELAY_S)
             session = None
-            restore_get_state = None
             try:
                 if owned:
                     rate_hz = rates[attempt - 1]
@@ -394,6 +350,11 @@ class FlashWorker(QThread):
                         raise RuntimeError("未找到可用探针（检查连接 / 驱动 / unique_id）")
 
                     session.open()
+                    # 连接成功后等链路稳定再 program（根因：连接后读取过快）。
+                    self.log_line.emit(
+                        "连接完成，等待 %.1f s 链路稳定后开始烧录 ..."
+                        % self.POST_CONNECT_DELAY_S)
+                    time.sleep(self.POST_CONNECT_DELAY_S)
                 else:
                     session = self.session
                     self.log_line.emit("使用已连接的探针 ...")
@@ -407,9 +368,6 @@ class FlashWorker(QThread):
                 )
                 if attempt > 1:
                     self.progress_value.emit(0)
-                # 擦除轮询期间容忍偶发 SWD 抖动（详见 _patch_get_state）。
-                restore_get_state = self._patch_get_state(
-                    session, TransferError, mods["Target"])
                 FileProgrammer(
                     session,
                     chip_erase=erase_arg,
@@ -419,9 +377,13 @@ class FlashWorker(QThread):
                     no_reset=False,
                     progress=self._progress,
                 ).program(self.image_path, base_address=self.base_address)
-                restore_get_state()
-                restore_get_state = None
                 session.target.reset()
+                # reset 后目标进入 running；等时钟/SWD 稳住再 close，
+                # 避免下次连接撞上未稳状态（Ali 2026-11-20 判断）。
+                self.log_line.emit(
+                    "复位完成，等待 %.1f s 目标稳定后断开 ..."
+                    % self.POST_RESET_DELAY_S)
+                time.sleep(self.POST_RESET_DELAY_S)
                 if attempt > 1:
                     self.log_line.emit("（第 %d 次尝试成功）" % attempt)
                 self.log_line.emit("烧录完成，已复位。")
@@ -451,11 +413,6 @@ class FlashWorker(QThread):
                     exc, self.target, self.pack_path))
                 return
             finally:
-                if restore_get_state is not None:
-                    try:
-                        restore_get_state()
-                    except Exception:
-                        pass
                 if owned and session is not None:
                     try:
                         session.close()
